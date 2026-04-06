@@ -18,7 +18,7 @@ SENHA_ACESSO = st.secrets["SENHA_ACESSO"]
 SENHA_ZERAR_ESTOQUE = st.secrets["SENHA_ZERAR_ESTOQUE"]
 LIMITE_PESSOAS = 40
 TEMPO_INATIVIDADE = 1
-DB_NAME = "almoxarifado.db"
+DB_NAME = "estoque_v2.db"
 
 # --- CSS GLOBAL ---
 st.markdown("""
