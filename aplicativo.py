@@ -17,8 +17,8 @@ st.set_page_config(page_title="Inventário José Rivelino", layout="wide", page_
 
 SENHA_ACESSO        = st.secrets["SENHA_ACESSO"]
 SENHA_ZERAR_ESTOQUE = st.secrets["SENHA_ZERAR_ESTOQUE"]
-LIMITE_PESSOAS      = 40
-TEMPO_INATIVIDADE   = 1
+LIMITE_PESSOAS      = 20
+TEMPO_INATIVIDADE   = 15
 DB_NAME             = "almoxarifado.db"
 
 st.markdown("""
@@ -131,7 +131,7 @@ def gerar_template_xlsx():
     df = pd.DataFrame({
         'Codigo':['ABC001','ABC002'],'Descricao':['Parafuso M8','Cabo Elétrico 2,5mm'],
         'Quantidade':[100,50],'Preco_Custo':[0.50,2.50],'Preco_Venda':[1.00,5.00],
-        'Vencimento':['2025-12-31','2026-06-30'],
+        'Vencimento':['31-12-2026','30-06-2026'],
     })
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
@@ -417,7 +417,7 @@ elif menu == "📥 Entrada":
                         st.cache_data.clear()
 
     with abas[1]:
-        st.info("Colunas: `Codigo` | `Descricao` | `Quantidade` | `Preco_Custo` | `Preco_Venda` | `Vencimento` (AAAA-MM-DD)")
+        st.info("Colunas: `Codigo` | `Descricao` | `Quantidade` | `Preco_Custo` | `Preco_Venda` | `Vencimento` (DD-MM-AAAA)")
         st.download_button("⬇️ Baixar Template", gerar_template_xlsx(), "template_inventario.xlsx")
         arq = st.file_uploader("Arquivo (.xlsx):", type=["xlsx"], key="upload_massa")
         if arq:
@@ -431,7 +431,7 @@ elif menu == "📥 Entrada":
                         du['Codigo']    = du['Codigo'].astype(str).str.strip()
                         du['Descricao'] = du['Descricao'].astype(str).str.strip()
                         du['Quantidade']= pd.to_numeric(du['Quantidade'], errors='coerce')
-                        du['Vencimento']= pd.to_datetime(du['Vencimento'], errors='coerce').dt.strftime('%Y-%m-%d')
+                        du['Vencimento']= pd.to_datetime(du['Vencimento'], errors='coerce').dt.strftime('%d-%m-%Y')
                         for col in ['Preco_Custo','Preco_Venda']:
                             if col not in du.columns: du[col]=0.0
                             du[col] = pd.to_numeric(du[col], errors='coerce').fillna(0.0)
