@@ -58,6 +58,12 @@ def init_db():
                 Vencimento   TEXT
             )
         ''')
+        for col, typedef in [("Vencimento","TEXT"),("Preco_Custo","REAL DEFAULT 0"),("Preco_Venda","REAL DEFAULT 0")]:
+            try:
+                c.execute(f"ALTER TABLE estoque ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass
+
         c.execute('''
             CREATE TABLE IF NOT EXISTS acessos (
                 sessao_id     TEXT PRIMARY KEY,
@@ -76,6 +82,10 @@ def init_db():
                 data             DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        try:
+            c.execute("ALTER TABLE financeiro ADD COLUMN preco_custo_unit REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
 init_db()
@@ -117,32 +127,35 @@ def buscar_item_por_codigo(cod):
         r = c.fetchone()
     return r['Descricao'] if r else None
 
+def gerar_template_xlsx():
+    df = pd.DataFrame({
+        'Codigo':['ABC001','ABC002'],'Descricao':['Parafuso M8','Cabo Elétrico 2,5mm'],
+        'Quantidade':[100,50],'Preco_Custo':[0.50,2.50],'Preco_Venda':[1.00,5.00],
+        'Vencimento':['31/12/2026','30/06/2026'],
+    })
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as w:
+        df.to_excel(w, index=False, sheet_name='Inventario')
+    return buf.getvalue()
+
 def gerar_excel_download(dataframe, nome_aba="Estoque"):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
         dataframe.to_excel(w, index=False, sheet_name=nome_aba)
     return buf.getvalue()
 
-def gerar_template_xlsx():
-    df_temp = pd.DataFrame({
-        'Codigo':['ABC001','ABC002'],'Descricao':['Arroz 5kg','Feijão 1kg'],
-        'Quantidade':[100,50],'Preco_Custo':[20.50,7.20],'Preco_Venda':[25.00,9.50],
-        'Vencimento':['31/12/2026','30/06/2026'],
-    })
-    return gerar_excel_download(df_temp, "Template Importação")
-
 # ==========================================
 # PROCESSAR VENCIDOS AUTOMÁTICO
 # ==========================================
 def processar_vencidos_automatico():
-    hoje_iso = date.today().isoformat()
+    hoje = date.today().isoformat()
     with get_conn() as conn:
         c = conn.cursor()
         c.execute('''
             SELECT id, Codigo, Descricao, Quantidade, Preco_Custo FROM estoque
             WHERE Vencimento IS NOT NULL AND Vencimento != ''
               AND Vencimento < ? AND Quantidade > 0
-        ''', (hoje_iso,))
+        ''', (hoje,))
         vencidos = c.fetchall()
         for item in vencidos:
             vp = item['Quantidade'] * item['Preco_Custo']
@@ -163,14 +176,14 @@ def carregar_estoque():
         c = conn.cursor()
         c.execute('SELECT Codigo,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento FROM estoque')
         rows = c.fetchall()
-    df_e = pd.DataFrame([dict(r) for r in rows],
+    df = pd.DataFrame([dict(r) for r in rows],
                       columns=['Codigo','Descricao','Quantidade','Preco_Custo','Preco_Venda','Vencimento'])
-    if not df_e.empty:
-        df_e['Quantidade']  = df_e['Quantidade'].astype(int)
-        df_e['Preco_Custo'] = df_e['Preco_Custo'].astype(float)
-        df_e['Preco_Venda'] = df_e['Preco_Venda'].astype(float)
-        df_e['Vencimento']  = pd.to_datetime(df_e['Vencimento'], errors='coerce')
-    return df_e
+    if not df.empty:
+        df['Quantidade']  = df['Quantidade'].astype(int)
+        df['Preco_Custo'] = df['Preco_Custo'].astype(float)
+        df['Preco_Venda'] = df['Preco_Venda'].astype(float)
+        df['Vencimento']  = pd.to_datetime(df['Vencimento'], errors='coerce')
+    return df
 
 @st.cache_data(ttl=60)
 def carregar_financeiro():
@@ -178,16 +191,16 @@ def carregar_financeiro():
         c = conn.cursor()
         c.execute('SELECT id,Codigo,Descricao,tipo,quantidade,preco_custo_unit,valor_total,data FROM financeiro ORDER BY data DESC')
         rows = c.fetchall()
-    df_f = pd.DataFrame([dict(r) for r in rows])
-    if not df_f.empty:
-        df_f['data']             = pd.to_datetime(df_f['data'])
-        df_f['valor_total']      = df_f['valor_total'].astype(float)
-        df_f['preco_custo_unit'] = df_f['preco_custo_unit'].astype(float)
-        df_f['quantidade']       = df_f['quantidade'].astype(int)
-    return df_f
+    df = pd.DataFrame([dict(r) for r in rows])
+    if not df.empty:
+        df['data']             = pd.to_datetime(df['data'])
+        df['valor_total']      = df['valor_total'].astype(float)
+        df['preco_custo_unit'] = df['preco_custo_unit'].astype(float)
+        df['quantidade']       = df['quantidade'].astype(int)
+    return df
 
 # ==========================================
-# APROVAÇÃO MASTER POR GMAIL
+# APROVAÇÃO MASTER POR E-MAIL
 # ==========================================
 def aprovar_acao_master(chave, descricao_acao):
     if f"token_{chave}" not in st.session_state:
@@ -199,25 +212,19 @@ def aprovar_acao_master(chave, descricao_acao):
         codigo = str(random.randint(100000, 999999))
         st.session_state[f"token_{chave}"] = codigo
         try:
-            # Configurado para Gmail
             rem  = st.secrets["email"]["remetente"]
-            pwd  = st.secrets["email"]["senha"] # Deve ser uma 'Senha de App' do Google
+            pwd  = st.secrets["email"]["senha"] # Senha de APP do Gmail
             dest = st.secrets["email"]["destinatario"]
-            
             msg  = MIMEText(f"Solicitante: {email_sol}\nAção: {descricao_acao}\nCódigo: {codigo}")
-            msg['Subject'] = 'Aprovação - Sistema Supermercado'
+            msg['Subject'] = 'Aprovação - Almoxarifado'
             msg['From'] = rem; msg['To'] = dest
-            
             with smtplib.SMTP('smtp.gmail.com', 587) as s:
-                s.starttls()
-                s.login(rem, pwd)
-                s.sendmail(rem, [dest], msg.as_string())
-            st.info("✅ Solicitação enviada via Gmail!")
+                s.starttls(); s.login(rem, pwd); s.sendmail(rem, [dest], msg.as_string())
+            st.info("✅ Solicitação enviada!")
         except Exception as e:
-            st.error(f"Erro ao enviar e-mail: {e}. Verifique se a 'Senha de App' está correta nos Secrets.")
-    
+            st.error(f"Erro ao enviar e-mail: {e}. Verifique as configurações de Senha de APP do Gmail.")
     if st.session_state[f"token_{chave}"]:
-        tok = st.text_input("🔑 Código de Liberação:", key=f"inp_{chave}")
+        tok = st.text_input("🔑 Código (enviado à Controladoria):", key=f"inp_{chave}")
         if st.button("✅ Confirmar Execução", key=f"exec_{chave}"):
             if tok == st.session_state[f"token_{chave}"]:
                 st.session_state[f"token_{chave}"] = None; return True
@@ -243,15 +250,16 @@ with get_conn() as conn:
     conn.commit()
 
 if total_ativos > LIMITE_PESSOAS:
-    st.error(f"⚠️ Sistema lotado ({total_ativos}/{LIMITE_PESSOAS}). Tente em alguns minutos.")
+    st.error(f"⚠️ Sistema lotado ({total_ativos}/{LIMITE_PESSOAS}). Tente em 1 minuto.")
     st.stop()
 
-# Auto-processamento
 vencidos_proc = processar_vencidos_automatico()
 if vencidos_proc:
     st.cache_data.clear()
+    nomes = ", ".join([f"{v['Descricao']} ({v['Quantidade']} un.)" for v in vencidos_proc])
+    st.warning(f"⚠️ **Descarte automático!** Itens vencidos baixados como Perda: {nomes}")
 
-df_global = carregar_estoque()
+df = carregar_estoque()
 
 # ==========================================
 # NAVEGAÇÃO
@@ -268,9 +276,8 @@ if menu == "📊 Consulta":
     src1 = logo_para_base64("logo1.png")
     img1 = f'<img class="il1" src="{src1}">' if src1 else '<span style="color:#102a43;font-weight:700;">LOGO 1</span>'
 
-    hoje = date.today()
-    df_ativos = df_global[df_global['Quantidade'] > 0].copy()
-    
+    hoje      = date.today()
+    df_ativos = df[df['Quantidade'] > 0].copy()
     tp = f"{df_ativos['Quantidade'].sum():.0f}" if not df_ativos.empty else "0"
     ti = str(df_ativos['Codigo'].nunique())     if not df_ativos.empty else "0"
     vc = cr = 0
@@ -279,184 +286,522 @@ if menu == "📊 Consulta":
         vc = int((df_ativos['_d'].dropna() < 0).sum())
         cr = int(((df_ativos['_d'].dropna() >= 0) & (df_ativos['_d'].dropna() <= 30)).sum())
 
+    ca = "alerta" if cr > 0 else ""
+    cp = "perigo" if vc > 0 else ""
+
     components.html(f"""<!DOCTYPE html><html><head>
     <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
       *{{box-sizing:border-box;margin:0;padding:0;font-family:'Sora',sans-serif;}}
       .hdr{{display:grid;grid-template-columns:auto 1fr;align-items:center;padding:20px 32px;border-radius:16px;margin-bottom:16px;background:linear-gradient(135deg,#f0f4f8,#d9e2ec);box-shadow:0 4px 12px rgba(0,0,0,.05);border:1px solid #e2e8f0;}}
+      .ll{{justify-self:start;padding-right:20px;}}
+      .tb{{text-align:left;}}
       .il1{{height:85px;width:auto;max-width:240px;object-fit:contain;mix-blend-mode:darken;}}
-      .tb{{text-align:left;padding-left:20px;}}
-      .tb h1{{font-size:1.8rem;font-weight:700;color:#102a43;}}
+      .tb h1{{font-size:1.8rem;font-weight:700;color:#102a43;letter-spacing:.02em;line-height:1.15;}}
+      .tb p{{font-size:.75rem;color:#334e68;margin-top:5px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;}}
       .mg{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:4px;}}
-      .mc{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px 20px;}}
-      .ml{{font-size:.78rem;color:#718096;font-weight:600;}}
-      .mv{{font-size:1.9rem;font-weight:700;color:#1a202c;}}
-      @media(max-width:768px){{.hdr{{grid-template-columns:1fr;text-align:center;}}.mg{{grid-template-columns:repeat(2,1fr);}}}}
+      .mc{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px 20px;box-shadow:0 1px 4px rgba(0,0,0,.05);}}
+      .mc.alerta{{border-color:#f6ad55;background:#fffbf0;}}.mc.perigo{{border-color:#fc8181;background:#fff5f5;}}
+      .ml{{font-size:.78rem;color:#718096;font-weight:600;margin-bottom:4px;}}
+      .mv{{font-size:1.9rem;font-weight:700;color:#1a202c;line-height:1.1;}}
+      .mv.alerta{{color:#c05621;}}.mv.perigo{{color:#c53030;}}
+      @media(max-width:768px){{.hdr{{grid-template-columns:1fr;gap:15px;padding:15px;text-align:center;}}.ll{{justify-self:center;padding-right:0;}}.tb{{text-align:center;}}.mg{{grid-template-columns:repeat(2,1fr);gap:8px;}}}}
     </style></head><body>
-    <div class="hdr"><div>{img1}</div><div class="tb"><h1>ESTOQUE ATUAL</h1><p>GERENCIAMENTO DE VALIDADE</p></div></div>
+    <div class="hdr"><div class="ll">{img1}</div><div class="tb"><h1>INVENTÁRIO JOSÉ RIVELINO</h1><p>ALMOXARIFADO</p></div></div>
     <div class="mg">
-      <div class="mc"><div class="ml">📦 Total Unidades</div><div class="mv">{tp}</div></div>
+      <div class="mc"><div class="ml">📦 Total de Peças</div><div class="mv">{tp}</div></div>
       <div class="mc"><div class="ml">🏷️ Itens Únicos</div><div class="mv">{ti}</div></div>
-      <div class="mc" style="border-left:5px solid orange;"><div class="ml">⚠️ Vence em 30 dias</div><div class="mv" style="color:orange;">{cr}</div></div>
-      <div class="mc" style="border-left:5px solid red;"><div class="ml">🔴 Vencidos</div><div class="mv" style="color:red;">{vc}</div></div>
-    </div></body></html>""", height=300)
+      <div class="mc {ca}"><div class="ml">⚠️ Vencem em 30 dias</div><div class="mv {ca}">{cr}</div></div>
+      <div class="mc {cp}"><div class="ml">🔴 Itens Vencidos</div><div class="mv {cp}">{vc}</div></div>
+    </div></body></html>""", height=330, scrolling=False)
 
     st.divider()
     
-    col_s1, col_s2 = st.columns([3, 1])
-    busca = col_s1.text_input("🔍 Pesquisar Produto:")
-    
+    col_busca, col_btn = st.columns([3, 1])
+    busca = col_busca.text_input("🔍 Pesquisar Código ou Descrição:")
     df_f = df_ativos.copy()
+    
     if busca:
         df_f = df_f[df_f['Codigo'].astype(str).str.contains(busca, case=False) |
                     df_f['Descricao'].str.contains(busca, case=False, na=False)]
 
     if not df_f.empty:
-        # Preparação para download ANTES de formatar para o HTML
-        df_export = df_f.copy()
-        df_export['Vencimento'] = df_export['Vencimento'].dt.strftime('%d/%m/%Y')
-        excel_data = gerar_excel_download(df_export, "Estoque_Consultado")
-        
-        col_s2.markdown("<br>", unsafe_allow_html=True)
-        col_s2.download_button("📥 Baixar Excel", excel_data, "Estoque_Filtrado.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-        # Exibição Visual (HTML)
         df_f['_dias'] = df_f['Vencimento'].apply(lambda v: (v.date()-hoje).days if pd.notna(v) else 99999)
         df_f = df_f.sort_values('_dias')
         
-        def linha_html(row):
+        # Botão de Download
+        df_export = df_f.copy()
+        df_export['Vencimento'] = df_export['Vencimento'].dt.strftime('%d/%m/%Y')
+        df_export = df_export.drop(columns=['_dias'])
+        excel_data = gerar_excel_download(df_export, "Consulta")
+        col_btn.markdown("<br>", unsafe_allow_html=True)
+        col_btn.download_button("📥 Baixar Excel", excel_data, "Estoque_Consultado.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        CORES = {
+            'vencido':        ('#fff0f0','#c53030','🔴'),
+            'critico':        ('#fff8e1','#92400e','🟠'),
+            'atencao':        ('#fffde7','#78350f','🟡'),
+            'ok':             ('#f0fff4','#276749','🟢'),
+            'sem_vencimento': ('#f7fafc','#718096','⚪'),
+        }
+        
+        def linha(row):
             d = None if row['_dias']==99999 else row['_dias']
-            st_class, lbl = status_vencimento(d)
-            v_formatada = row['Vencimento'].strftime('%d/%m/%Y') if pd.notna(row['Vencimento']) else '—'
-            
-            # Cores dinâmicas
-            bg = "#fff"
-            if st_class == 'vencido': bg = "#fff5f5"
-            elif st_class == 'critico': bg = "#fffaf0"
-            
+            st_, lbl = status_vencimento(d)
+            bg,fg,ic = CORES[st_]
+            vs = row['Vencimento'].strftime('%d/%m/%Y') if pd.notna(row['Vencimento']) else '—'
             return (f'<tr style="background:{bg};"><td>{row["Codigo"]}</td><td>{row["Descricao"]}</td>'
                     f'<td style="text-align:center;">{row["Quantidade"]}</td>'
+                    f'<td style="text-align:center;">{formatar_moeda(row["Preco_Custo"])}</td>'
                     f'<td style="text-align:center;">{formatar_moeda(row["Preco_Venda"])}</td>'
-                    f'<td style="text-align:center; font-weight:700;">{v_formatada}</td>'
-                    f'<td style="text-align:center; font-size:0.8rem;">{lbl}</td></tr>')
-
-        linhas = "\n".join(df_f.apply(linha_html, axis=1))
+                    f'<td style="text-align:center;color:{fg};font-weight:600;">{ic} {vs}</td>'
+                    f'<td style="text-align:center;color:{fg};font-weight:600;font-size:.85rem;">{lbl}</td></tr>')
+                    
+        linhas = "\n".join(df_f.apply(linha, axis=1))
+        
         components.html(f"""
         <style>
-          .t{{width:100%; border-collapse:collapse; font-family:'Sora',sans-serif; font-size:0.9rem;}}
-          .t th{{background:#1a3a4a; color:#fff; padding:12px; text-align:left;}}
-          .t td{{padding:10px; border-bottom:1px solid #eee;}}
+          @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&display=swap');
+          .t{{width:100%;border-collapse:collapse;font-family:'Sora',sans-serif;font-size:.88rem;}}
+          .t th{{background:#1a3a4a;color:#fff;padding:10px 12px;text-align:left;font-weight:600;}}
+          .t td{{padding:9px 12px;border-bottom:1px solid #e2e8f0;}}
+          .leg{{display:flex;gap:18px;margin-top:12px;font-size:.8rem;font-family:'Sora',sans-serif;flex-wrap:wrap;}}
+          .li{{display:flex;align-items:center;gap:5px;}}
         </style>
         <table class="t"><thead><tr>
-          <th>Código</th><th>Descrição</th><th>Qtd</th><th>Venda</th><th>Vencimento</th><th>Status</th>
-        </tr></thead><tbody>{linhas}</tbody></table>""", height=500, scrolling=True)
+          <th>Código</th><th>Descrição</th><th>Qtd</th><th>Preço Custo</th><th>Preço Venda</th><th>Vencimento</th><th>Status</th>
+        </tr></thead><tbody>{linhas}</tbody></table>
+        <div class="leg">
+          <div class="li">🔴 Vencido</div><div class="li">🟠 ≤30 dias</div>
+          <div class="li">🟡 ≤90 dias</div><div class="li">🟢 OK</div><div class="li">⚪ Sem vencimento</div>
+        </div>""", height=min(600, 120+len(df_f)*42), scrolling=True)
     else:
-        st.info("Nenhum item em estoque para exibir.")
+        st.info("Nenhum item encontrado.")
 
 # ==========================================
 # TELA 2 — ENTRADA
 # ==========================================
 elif menu == "📥 Entrada":
-    st.title("📥 Entrada de Estoque")
-    abas = st.tabs(["Individual", "Carga em Massa"])
+    st.title("📥 Entrada de Itens")
+    
+    abas = st.tabs(["📝 Registro Individual", "📤 Carga em Massa"])
 
     with abas[0]:
-        with st.form("f_ent", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            cod = c1.text_input("Código:")
-            desc = c2.text_input("Descrição:")
-            venc = st.date_input("Vencimento:", value=date.today()+timedelta(days=365))
-            
-            c3, c4, c5 = st.columns(3)
-            pc = c3.number_input("Custo Unitário", min_value=0.0)
-            pv = c4.number_input("Venda Unitário", min_value=0.0)
-            qt = c5.number_input("Quantidade", min_value=1)
+        with st.form("entrada_individual", clear_on_submit=True):
+            st.markdown("**1. Identificação do Produto**")
+            c1,c2 = st.columns(2)
+            cod        = c1.text_input("Código:")
+            desc_input = c2.text_input("Descrição (obrigatória para itens novos):")
 
-            if st.form_submit_button("Confirmar Entrada"):
-                # Salvamos no banco no formato ISO (AAAA-MM-DD) para lógica, mas no Excel aceitamos DD/MM/AAAA
-                v_iso = venc.isoformat()
-                with get_conn() as conn:
-                    cur = conn.cursor()
-                    cur.execute('SELECT id FROM estoque WHERE Codigo=? AND Vencimento=?', (cod, v_iso))
-                    res = cur.fetchone()
-                    if res:
-                        cur.execute('UPDATE estoque SET Quantidade=Quantidade+?, Preco_Custo=?, Preco_Venda=? WHERE id=?', (qt, pc, pv, res['id']))
+            st.markdown("**2. Vencimento** *(obrigatório)*")
+            venc_in = st.date_input("Data de Vencimento:",
+                min_value=date.today(), value=date.today()+timedelta(days=365), key="venc_entrada", format="DD/MM/YYYY")
+
+            st.markdown("**3. Preços** *(obrigatório para novas entradas)*")
+            c3,c4 = st.columns(2)
+            preco_custo = c3.number_input("Preço de Custo Unitário (R$)", min_value=0.0, format="%.2f", step=0.50)
+            preco_venda = c4.number_input("Preço de Venda Unitário (R$)", min_value=0.0, format="%.2f", step=0.50)
+
+            st.markdown("**4. Quantidade**")
+            qtd = st.number_input("Qtd:", min_value=1, step=1, format="%d")
+
+            if st.form_submit_button("✅ Registrar Entrada"):
+                if not cod:
+                    st.error("⛔ Informe o Código do item.")
+                else:
+                    de = buscar_item_por_codigo(cod)
+                    if not de and not desc_input:
+                        st.error("⛔ Descrição obrigatória para novos itens.")
+                    elif de and desc_input and desc_input.strip() != de.strip():
+                        st.error(f"⛔ Conflito! Código **{cod}** já cadastrado como: **\"{de}\"**")
                     else:
-                        cur.execute('INSERT INTO estoque (Codigo,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento) VALUES (?,?,?,?,?,?)', (cod, desc, qt, pc, pv, v_iso))
-                    conn.commit()
-                st.success("Registrado!")
-                st.cache_data.clear()
+                        df2 = de if de else desc_input
+                        vs  = venc_in.isoformat()
+                        with get_conn() as conn:
+                            cur = conn.cursor()
+                            cur.execute('SELECT id,Quantidade,Preco_Custo,Preco_Venda FROM estoque WHERE Codigo=? AND Vencimento=?', (cod,vs))
+                            res = cur.fetchone()
+                            if res:
+                                nc = preco_custo if preco_custo>0 else res['Preco_Custo']
+                                nv = preco_venda if preco_venda>0 else res['Preco_Venda']
+                                cur.execute('UPDATE estoque SET Quantidade=Quantidade+?,Preco_Custo=?,Preco_Venda=?,Vencimento=? WHERE id=?',
+                                            (qtd,nc,nv,vs,res['id']))
+                                st.success(f"✅ Entrada registrada. Novo saldo: {res['Quantidade']+qtd}")
+                            else:
+                                cur.execute('INSERT INTO estoque (Codigo,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento) VALUES (?,?,?,?,?,?)',
+                                            (cod,df2,qtd,preco_custo,preco_venda,vs))
+                                st.success("✅ Novo item cadastrado.")
+                            conn.commit()
+                        st.cache_data.clear()
 
     with abas[1]:
-        st.download_button("⬇️ Baixar Template Excel (Modelo)", gerar_template_xlsx(), "modelo_importacao.xlsx")
-        arq = st.file_uploader("Subir planilha preenchida:", type="xlsx")
-        if arq and st.button("🚀 Importar Agora"):
+        st.info("Colunas: `Codigo` | `Descricao` | `Quantidade` | `Preco_Custo` | `Preco_Venda` | `Vencimento` (DD/MM/AAAA)")
+        st.download_button("⬇️ Baixar Template", gerar_template_xlsx(), "template_inventario.xlsx")
+        arq = st.file_uploader("Arquivo (.xlsx):", type=["xlsx"], key="upload_massa")
+        if arq:
             try:
-                du = pd.read_excel(arq)
-                # Converte datas brasileiras para ISO antes de salvar
-                du['Vencimento'] = pd.to_datetime(du['Vencimento'], dayfirst=True).dt.strftime('%Y-%m-%d')
-                with get_conn() as conn:
-                    cur = conn.cursor()
-                    for _, r in du.iterrows():
-                        cur.execute('INSERT INTO estoque (Codigo,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento) VALUES (?,?,?,?,?,?)',
-                                   (str(r['Codigo']), r['Descricao'], r['Quantidade'], r['Preco_Custo'], r['Preco_Venda'], r['Vencimento']))
-                    conn.commit()
-                st.success("Importação concluída!")
-                st.cache_data.clear()
+                du = pd.read_excel(arq, engine='openpyxl')
+                falt = {'Codigo','Descricao','Quantidade','Vencimento'} - set(du.columns)
+                if falt:
+                    st.error(f"⛔ Colunas ausentes: {', '.join(falt)}")
+                else:
+                    if st.button("🚀 Processar Importação"):
+                        du['Codigo']    = du['Codigo'].astype(str).str.strip()
+                        du['Descricao'] = du['Descricao'].astype(str).str.strip()
+                        du['Quantidade']= pd.to_numeric(du['Quantidade'], errors='coerce')
+                        
+                        # Converte formato brasileiro para salvar no banco (ISO)
+                        du['Vencimento'] = pd.to_datetime(du['Vencimento'], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
+                        
+                        for col in ['Preco_Custo','Preco_Venda']:
+                            if col not in du.columns: du[col]=0.0
+                            du[col] = pd.to_numeric(du[col], errors='coerce').fillna(0.0)
+                        du = du.dropna(subset=['Quantidade','Vencimento'])
+                        du = du[du['Quantidade']>0]; du['Quantidade']=du['Quantidade'].astype(int)
+                        du = du[~du['Codigo'].isin(['nan',''])]
+                        with get_conn() as conn:
+                            cur = conn.cursor()
+                            cur.execute('SELECT Codigo,Vencimento FROM estoque')
+                            dbs = set((r['Codigo'],r['Vencimento']) for r in cur.fetchall())
+                            ins,upd=[],[]
+                            for _,row in du.iterrows():
+                                k=(row['Codigo'],row['Vencimento'])
+                                if k in dbs: upd.append((row['Quantidade'],row['Preco_Custo'],row['Preco_Venda'],row['Codigo'],row['Vencimento']))
+                                else: ins.append((row['Codigo'],row['Descricao'],row['Quantidade'],row['Preco_Custo'],row['Preco_Venda'],row['Vencimento'])); dbs.add(k)
+                            if ins: cur.executemany('INSERT INTO estoque (Codigo,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento) VALUES (?,?,?,?,?,?)',ins)
+                            if upd: cur.executemany('UPDATE estoque SET Quantidade=Quantidade+?,Preco_Custo=MAX(Preco_Custo,?),Preco_Venda=MAX(Preco_Venda,?) WHERE Codigo=? AND Vencimento=?',upd)
+                            conn.commit()
+                        st.success(f"✅ {len(ins)} inseridos, {len(upd)} atualizados.")
+                        st.cache_data.clear(); st.rerun()
             except Exception as e:
-                st.error(f"Erro na data ou formato: {e}")
+                st.error(f"Erro: {e}")
 
 # ==========================================
 # TELA 3 — SAÍDA
 # ==========================================
 elif menu == "📤 Saída":
-    st.title("📤 Saída (Venda ou Perda)")
-    with st.form("f_sai", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        cod = c1.text_input("Código do Produto:")
-        qtd = c2.number_input("Quantidade:", min_value=1)
-        tipo = st.selectbox("Tipo de Saída:", ["Venda", "Perda"])
-        
-        if st.form_submit_button("Confirmar Saída"):
+    st.title("📤 Saída de Itens")
+
+    st.markdown("**1. Identificação do Item**")
+    c1,c2 = st.columns(2)
+    cod_s = c1.text_input("Código:", key="cod_s")
+    op_s  = c2.selectbox("Operação:", ["Venda","Perda"], key="op_s")
+
+    st.markdown("**2. Lote / Vencimento**")
+    st.caption("Deixe em branco para usar o lote mais antigo (FIFO).")
+    venc_s = st.date_input("Vencimento do Lote (opcional):", value=None, key="venc_s", format="DD/MM/YYYY")
+
+    st.markdown("**3. Quantidade**")
+    qtd_s = st.number_input("Qtd:", min_value=1, step=1, format="%d", key="qtd_s")
+
+    item_pv = None
+    preco_conf = None
+
+    if cod_s:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            if venc_s:
+                cur.execute('''SELECT id,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento
+                               FROM estoque WHERE Codigo=? AND Vencimento=? AND Quantidade>0''',
+                        (cod_s, venc_s.isoformat()))
+            else:
+                cur.execute('''SELECT id,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento
+                               FROM estoque WHERE Codigo=? AND Quantidade>0
+                               ORDER BY Vencimento ASC LIMIT 1''', (cod_s,))
+            item_pv = cur.fetchone()
+
+        if item_pv:
+            vf = datetime.strptime(item_pv['Vencimento'], '%Y-%m-%d').strftime('%d/%m/%Y') if item_pv['Vencimento'] else '—'
+            st.info(
+                f"📦 **{item_pv['Descricao']}** | Lote: `{vf}` | "
+                f"Saldo: **{item_pv['Quantidade']}** un. | "
+                f"Custo unit.: {formatar_moeda(item_pv['Preco_Custo'])} | "
+                f"Venda padrão: {formatar_moeda(item_pv['Preco_Venda'])}"
+            )
+            if op_s == "Venda":
+                st.markdown("**4. Confirmar / Ajustar Preço de Venda**")
+                st.caption("Preço padrão do cadastro já preenchido. Altere para aplicar promoção ou desconto.")
+                preco_conf = st.number_input(
+                    "💲 Preço de Venda Unitário (R$):",
+                    min_value=0.01,
+                    value=float(item_pv['Preco_Venda']),
+                    format="%.2f", step=0.50, key="preco_conf"
+                )
+                valor_total_prev = qtd_s * preco_conf
+                lucro_prev       = valor_total_prev - qtd_s * item_pv['Preco_Custo']
+                margem_prev      = lucro_prev / valor_total_prev * 100 if valor_total_prev > 0 else 0
+
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("Receita prevista",    formatar_moeda(valor_total_prev))
+                col_b.metric("Lucro bruto previsto", formatar_moeda(lucro_prev))
+                col_c.metric("Margem prevista",      f"{margem_prev:.1f}%")
+
+                if preco_conf < item_pv['Preco_Custo']:
+                    st.warning(
+                        f"⚠️ Preço ({formatar_moeda(preco_conf)}) abaixo do custo "
+                        f"({formatar_moeda(item_pv['Preco_Custo'])}). Venda com prejuízo."
+                    )
+            else:
+                preco_conf = item_pv['Preco_Custo']
+        else:
+            st.error("⛔ Item não encontrado ou sem estoque para este lote.")
+
+    st.divider()
+    if st.button("✅ Confirmar Saída", key="btn_saida"):
+        if not cod_s:
+            st.error("⛔ Informe o Código.")
+        elif item_pv is None:
+            st.error("⛔ Item não encontrado.")
+        elif item_pv['Quantidade'] < qtd_s:
+            st.error(f"⛔ Estoque insuficiente! Disponível: {item_pv['Quantidade']} un.")
+        else:
             with get_conn() as conn:
                 cur = conn.cursor()
-                # Pega o lote que vence primeiro (FIFO)
-                cur.execute('SELECT id, Preco_Custo, Preco_Venda, Descricao FROM estoque WHERE Codigo=? AND Quantidade >= ? ORDER BY Vencimento ASC LIMIT 1', (cod, qtd))
-                item = cur.fetchone()
-                if item:
-                    valor = item['Preco_Venda'] if tipo == "Venda" else item['Preco_Custo']
-                    cur.execute('UPDATE estoque SET Quantidade = Quantidade - ? WHERE id = ?', (qtd, item['id']))
-                    cur.execute('INSERT INTO financeiro (Codigo, Descricao, tipo, quantidade, preco_custo_unit, valor_total) VALUES (?,?,?,?,?,?)',
-                               (cod, item['Descricao'], tipo, qtd, item['Preco_Custo'], qtd * valor))
-                    conn.commit()
-                    st.success("Saída efetuada!")
-                    st.cache_data.clear()
+                cur.execute('UPDATE estoque SET Quantidade=Quantidade-? WHERE id=?', (qtd_s, item_pv['id']))
+                if op_s == "Venda":
+                    val   = qtd_s * preco_conf
+                    ganho = val - qtd_s * item_pv['Preco_Custo']
+                    cur.execute('INSERT INTO financeiro (Codigo,Descricao,tipo,quantidade,preco_custo_unit,valor_total) VALUES (?,?,?,?,?,?)',
+                                (cod_s, item_pv['Descricao'], 'Venda', qtd_s, item_pv['Preco_Custo'], val))
+                    st.success(f"✅ Venda registrada! Receita: {formatar_moeda(val)} | Lucro bruto: {formatar_moeda(ganho)}")
                 else:
-                    st.error("Produto não encontrado ou estoque insuficiente no lote mais antigo.")
+                    val = qtd_s * item_pv['Preco_Custo']
+                    cur.execute('INSERT INTO financeiro (Codigo,Descricao,tipo,quantidade,preco_custo_unit,valor_total) VALUES (?,?,?,?,?,?)',
+                                (cod_s, item_pv['Descricao'], 'Perda', qtd_s, item_pv['Preco_Custo'], val))
+                    st.success(f"✅ Perda registrada! Prejuízo: {formatar_moeda(val)}")
+                conn.commit()
+            st.cache_data.clear()
 
 # ==========================================
-# ADMINISTRATIVO & FINANCEIRO (Mantidos com Lógica de Senha)
+# TELA 4 — ADMINISTRATIVO
 # ==========================================
 elif menu == "🔒 Administrativo":
-    st.title("🔒 Administrativo")
-    if st.text_input("Senha Master:", type="password") == SENHA_ZERAR_ESTOQUE:
-        if st.button("🗑️ Zerar Todo o Estoque"):
-            if aprovar_acao_master("limpar", "Zerar tudo"):
+    st.title("🔒 Área Administrativa")
+    senha = st.text_input("Senha:", type="password", key="senha_admin")
+
+    if senha == SENHA_ZERAR_ESTOQUE:
+        abas = st.tabs(["🗑️ Excluir Item","⚠️ Limpar Dados"])
+
+        with abas[0]:
+            st.subheader("🗑️ Excluir Item do Banco")
+            cod_del = st.text_input("Código do item:")
+            if cod_del and aprovar_acao_master("del_item", f"Excluir código {cod_del}"):
                 with get_conn() as conn:
-                    conn.cursor().execute("DELETE FROM estoque")
+                    cur = conn.cursor()
+                    cur.execute('SELECT * FROM estoque WHERE Codigo=?', (cod_del,))
+                    if cur.fetchone():
+                        cur.execute('DELETE FROM estoque WHERE Codigo=?', (cod_del,))
+                        st.success(f"✅ Código **{cod_del}** apagado!")
+                    else:
+                        st.error("⛔ Código não encontrado.")
                     conn.commit()
-                st.success("Banco limpo.")
                 st.cache_data.clear()
 
+        with abas[1]:
+            st.subheader("⚠️ Área de Risco")
+            opcao = st.radio("Ação:", [
+                "1️⃣ Zerar quantidades (mantém cadastros)",
+                "2️⃣ Excluir todo o estoque",
+                "3️⃣ Limpar histórico financeiro",
+            ])
+            if aprovar_acao_master("limpeza", f"Limpeza: {opcao}"):
+                with get_conn() as conn:
+                    cur = conn.cursor()
+                    if "1️⃣" in opcao: cur.execute('UPDATE estoque SET Quantidade=0'); st.success("Quantidades zeradas!")
+                    elif "2️⃣" in opcao: cur.execute("DELETE FROM estoque"); st.success("Estoque apagado!")
+                    elif "3️⃣" in opcao: cur.execute("DELETE FROM financeiro"); st.success("Histórico financeiro limpo!")
+                    conn.commit()
+                st.cache_data.clear(); st.rerun()
+    elif senha:
+        st.error("⛔ Senha incorreta.")
+
+# ==========================================
+# TELA 5 — FINANCEIRO
+# ==========================================
 elif menu == "🔒 Financeiro":
-    st.title("🔒 Financeiro")
-    if st.text_input("Senha Financeira:", type="password") == SENHA_ACESSO:
+    st.title("🔒 Dashboard Financeiro")
+    
+    senha = st.text_input("Senha:", type="password", key="senha_fin")
+
+    if senha in (SENHA_ACESSO, SENHA_ZERAR_ESTOQUE):
+        col_fi, col_ff = st.columns(2)
+        data_ini = col_fi.date_input("📅 De:", value=date.today().replace(day=1), format="DD/MM/YYYY")
+        data_fim = col_ff.date_input("📅 Até:", value=date.today(), format="DD/MM/YYYY")
+
         df_fin = carregar_financeiro()
-        if not df_fin.empty:
-            # Formatação de data na tabela financeira para o usuário
-            df_display = df_fin.copy()
-            df_display['data'] = df_display['data'].dt.strftime('%d/%m/%Y %H:%M')
-            st.dataframe(df_display, use_container_width=True)
+
+        if df_fin.empty:
+            st.info("Nenhuma movimentação registrada ainda.")
+        else:
+            mask  = (df_fin['data'].dt.date >= data_ini) & (df_fin['data'].dt.date <= data_fim)
+            df_p  = df_fin[mask].copy()
+            df_v  = df_p[df_p['tipo'] == 'Venda']
+            df_pr = df_p[df_p['tipo'] == 'Perda']
+
+            receita     = df_v['valor_total'].sum()
+            custo_vend  = (df_v['preco_custo_unit'] * df_v['quantidade']).sum()
+            lucro       = receita - custo_vend
+            margem      = (lucro / receita * 100) if receita > 0 else 0
+            tot_perdas  = df_pr['valor_total'].sum()
+            resultado   = lucro - tot_perdas
+
+            with get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute('SELECT COALESCE(SUM(Quantidade*Preco_Custo),0) as v FROM estoque WHERE Quantidade>0')
+                val_estoque = float(cur.fetchone()['v'])
+
+            st.markdown("### 📊 Resumo do Período")
             
-            total_vendas = df_fin[df_fin['tipo']=='Venda']['valor_total'].sum()
-            st.metric("Total de Vendas no Período", formatar_moeda(total_vendas))
+            k1, k2, k3 = st.columns(3)
+            k1.metric("💵 Receita Bruta",      formatar_moeda(receita))
+            k2.metric("🏷️ Custo das Vendas",  formatar_moeda(custo_vend))
+            k3.metric("📈 Lucro Bruto",        formatar_moeda(lucro), delta=f"{margem:.1f}% margem")
+
+            st.markdown("<br>", unsafe_allow_html=True) 
+            
+            k4, k5, k6 = st.columns(3)
+            k4.metric("🗑️ Perdas",             formatar_moeda(tot_perdas))
+            k5.metric("✅ Resultado Líquido",  formatar_moeda(resultado))
+            k6.metric("📦 Valor em Estoque",   formatar_moeda(val_estoque))
+
+            st.divider()
+            tab_mov, tab_ins, tab_mg, tab_giro = st.tabs(
+                ["📋 Movimentações", "💡 Insights", "📊 Margem por Item", "🔄 Giro de Estoque"]
+            )
+
+            # ---- Movimentações ----
+            with tab_mov:
+                if df_p.empty:
+                    st.info("Sem movimentações no período.")
+                else:
+                    ex = df_p.copy()
+                    ex['Custo Total'] = (ex['preco_custo_unit'] * ex['quantidade']).apply(formatar_moeda)
+                    ex['Ganho']       = ex.apply(
+                        lambda r: formatar_moeda(r['valor_total'] - r['preco_custo_unit']*r['quantidade'])
+                        if r['tipo']=='Venda' else '—', axis=1)
+                    ex['data']        = ex['data'].dt.strftime('%d/%m/%Y %H:%M')
+                    ex['valor_total'] = ex['valor_total'].apply(formatar_moeda)
+                    ex = ex.rename(columns={'data':'Data','tipo':'Operação','Codigo':'Código',
+                                            'Descricao':'Descrição','quantidade':'Qtd','valor_total':'Valor Total'})
+                    st.dataframe(ex[['Data','Operação','Código','Descrição','Qtd','Custo Total','Valor Total','Ganho']],
+                                 use_container_width=True, hide_index=True)
+
+            # ---- Insights ----
+            with tab_ins:
+                st.subheader("💡 Insights do Período")
+                if df_v.empty:
+                    st.info("Sem vendas no período para gerar insights.")
+                else:
+                    top_rec = df_v.groupby('Descricao')['valor_total'].sum().sort_values(ascending=False).head(5).reset_index()
+                    top_rec.columns = ['Produto','Receita Total']
+
+                    top_vol = df_v.groupby('Descricao')['quantidade'].sum().sort_values(ascending=False).head(5).reset_index()
+                    top_vol.columns = ['Produto','Qtd Vendida']
+
+                    dv2 = df_v.copy()
+                    dv2['ganho_u'] = dv2['valor_total'] - dv2['preco_custo_unit']*dv2['quantidade']
+                    top_mg = dv2.groupby('Descricao').apply(
+                        lambda g: g['ganho_u'].sum()/g['valor_total'].sum()*100 if g['valor_total'].sum()>0 else 0
+                    ).sort_values(ascending=False).head(5).reset_index()
+                    top_mg.columns = ['Produto','Margem (%)']
+
+                    c1,c2 = st.columns(2)
+                    with c1:
+                        st.markdown("#### 🥇 Maior Receita")
+                        df_r = top_rec.copy(); df_r['Receita Total'] = df_r['Receita Total'].apply(formatar_moeda)
+                        st.dataframe(df_r, use_container_width=True, hide_index=True)
+                        st.markdown("#### 🔄 Maior Volume de Vendas")
+                        st.dataframe(top_vol, use_container_width=True, hide_index=True)
+                    with c2:
+                        st.markdown("#### 📈 Melhor Margem de Lucro")
+                        df_m = top_mg.copy(); df_m['Margem (%)'] = df_m['Margem (%)'].apply(lambda x: f"{x:.1f}%")
+                        st.dataframe(df_m, use_container_width=True, hide_index=True)
+                        if not df_pr.empty:
+                            st.markdown("#### 🗑️ Maiores Perdas")
+                            tp2 = df_pr.groupby('Descricao')['valor_total'].sum().sort_values(ascending=False).head(5).reset_index()
+                            tp2.columns=['Produto','Valor Perdido']; tp2['Valor Perdido']=tp2['Valor Perdido'].apply(formatar_moeda)
+                            st.dataframe(tp2, use_container_width=True, hide_index=True)
+
+                    st.divider()
+                    st.markdown("#### ⚡ Alertas Automáticos")
+                    alertas = []
+
+                    # Vendas abaixo do custo
+                    dv2['abaixo'] = dv2['ganho_u'] < 0
+                    for p in dv2[dv2['abaixo']]['Descricao'].unique():
+                        alertas.append(("🔴", f"**{p}** vendido abaixo do custo em alguma transação."))
+
+                    # Perdas > 20% da receita
+                    if receita > 0 and tot_perdas/receita > 0.2:
+                        alertas.append(("🟠", f"Perdas = **{tot_perdas/receita*100:.1f}%** da receita — acima de 20%."))
+
+                    # Margem bruta baixa
+                    if 0 < margem < 15:
+                        alertas.append(("🟡", f"Margem bruta baixa: **{margem:.1f}%**. Revisar preços de venda."))
+
+                    # Alto giro com baixa margem
+                    vol_prod = dv2.groupby('Descricao')['quantidade'].sum()
+                    mg_prod  = dv2.groupby('Descricao').apply(
+                        lambda g: g['ganho_u'].sum()/g['valor_total'].sum()*100 if g['valor_total'].sum()>0 else 0)
+                    for prod in vol_prod.index:
+                        if vol_prod[prod] >= 10 and mg_prod.get(prod, 100) < 10:
+                            alertas.append(("🟡", f"**{prod}** — alto giro mas margem < 10%. Revisar precificação."))
+
+                    if not alertas:
+                        st.success("✅ Nenhum alerta identificado. Operação saudável!")
+                    else:
+                        for em, msg in alertas:
+                            if em=="🔴": st.error(f"{em} {msg}")
+                            elif em=="🟠": st.warning(f"{em} {msg}")
+                            else: st.info(f"{em} {msg}")
+
+            # ---- Margem por Item ----
+            with tab_mg:
+                st.subheader("📊 Análise de Margem por Produto")
+                if df_v.empty:
+                    st.info("Sem vendas no período.")
+                else:
+                    dm = df_v.copy()
+                    dm['custo_t'] = dm['preco_custo_unit'] * dm['quantidade']
+                    dm['ganho']   = dm['valor_total'] - dm['custo_t']
+                    res = dm.groupby('Descricao').agg(
+                        Qtd=('quantidade','sum'), Receita=('valor_total','sum'),
+                        Custo=('custo_t','sum'), Lucro=('ganho','sum')
+                    ).reset_index()
+                    res['Margem (%)'] = res.apply(lambda r: r['Lucro']/r['Receita']*100 if r['Receita']>0 else 0, axis=1)
+                    res = res.sort_values('Margem (%)', ascending=False)
+                    fmt = res.copy()
+                    fmt['Receita']    = fmt['Receita'].apply(formatar_moeda)
+                    fmt['Custo']      = fmt['Custo'].apply(formatar_moeda)
+                    fmt['Lucro']      = fmt['Lucro'].apply(formatar_moeda)
+                    fmt['Margem (%)'] = fmt['Margem (%)'].apply(lambda x: f"{x:.1f}%")
+                    fmt.columns = ['Produto','Qtd Vendida','Receita','Custo das Vendas','Lucro Bruto','Margem (%)']
+                    st.dataframe(fmt, use_container_width=True, hide_index=True)
+
+            # ---- Giro de Estoque ----
+            with tab_giro:
+                st.subheader("🔄 Giro de Estoque")
+                st.caption("Giro = Qtd vendida no período ÷ Qtd atual em estoque.")
+                if df_v.empty:
+                    st.info("Sem vendas no período.")
+                else:
+                    vc2 = df_v.groupby('Codigo')['quantidade'].sum().reset_index()
+                    vc2.columns = ['Codigo','Qtd_Vendida']
+                    est = df[df['Quantidade']>0][['Codigo','Descricao','Quantidade']].copy()
+                    est = est.groupby(['Codigo','Descricao'])['Quantidade'].sum().reset_index()
+                    giro = est.merge(vc2, on='Codigo', how='left').fillna(0)
+                    giro['Giro'] = giro.apply(lambda r: r['Qtd_Vendida']/r['Quantidade'] if r['Quantidade']>0 else 0, axis=1)
+                    giro = giro.sort_values('Giro', ascending=False)
+                    def tag(g):
+                        if g==0: return "⚪ Parado"
+                        if g<0.3: return "🔴 Baixo"
+                        if g<0.7: return "🟡 Médio"
+                        if g<1.5: return "🟢 Bom"
+                        return "🔵 Alto"
+                    giro['Status'] = giro['Giro'].apply(tag)
+                    giro['Giro']   = giro['Giro'].apply(lambda x: f"{x:.2f}x")
+                    giro.columns   = ['Código','Produto','Qtd em Estoque','Qtd Vendida','Giro','Status']
+                    st.dataframe(giro, use_container_width=True, hide_index=True)
+                    st.caption("🔵 Alto (>1.5x) · 🟢 Bom (0.7–1.5x) · 🟡 Médio (0.3–0.7x) · 🔴 Baixo (<0.3x) · ⚪ Sem venda")
+    elif senha:
+        st.error("⛔ Senha incorreta.")
