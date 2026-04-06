@@ -1,8 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import sqlite3
 import uuid
 from datetime import datetime, timedelta
 import io
@@ -18,9 +17,9 @@ st.set_page_config(page_title="Inventário José Rivelino", layout="wide", page_
 ARQUIVO_PLANILHA = 'Almoxarifado.xlsm'
 SENHA_ACESSO = st.secrets["SENHA_ACESSO"]
 SENHA_ZERAR_ESTOQUE = st.secrets["SENHA_ZERAR_ESTOQUE"]
-DATABASE_URL = st.secrets["DATABASE_URL"]
 LIMITE_PESSOAS = 40
 TEMPO_INATIVIDADE = 1
+DB_NAME = "almoxarifado.db"
 
 # --- CSS GLOBAL ---
 st.markdown("""
@@ -38,49 +37,49 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONEXÃO COM SUPABASE ---
+# --- CONEXÃO COM SQLITE ---
 def get_conn():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 # --- BANCO DE DADOS ---
 def init_db():
     with get_conn() as conn:
-        with conn.cursor() as c:
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS estoque (
-                    id SERIAL PRIMARY KEY,
-                    "Codigo" TEXT,
-                    "Descricao" TEXT,
-                    "Quantidade" INTEGER,
-                    "CC" TEXT
-                )
-            ''')
-            # Adiciona colunas de preço caso não existam
-            c.execute('ALTER TABLE estoque ADD COLUMN IF NOT EXISTS "Preco_Custo" NUMERIC(10,2) DEFAULT 0.00')
-            c.execute('ALTER TABLE estoque ADD COLUMN IF NOT EXISTS "Preco_Venda" NUMERIC(10,2) DEFAULT 0.00')
-            
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS acessos (
-                    sessao_id TEXT PRIMARY KEY,
-                    ultimo_clique TIMESTAMP
-                )
-            ''')
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS centros_custo (
-                    nome TEXT PRIMARY KEY
-                )
-            ''')
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS financeiro (
-                    id SERIAL PRIMARY KEY,
-                    "Codigo" TEXT,
-                    "Descricao" TEXT,
-                    tipo TEXT,
-                    quantidade INTEGER,
-                    valor_total NUMERIC(10,2),
-                    data TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS estoque (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Codigo TEXT,
+                Descricao TEXT,
+                Quantidade INTEGER,
+                CC TEXT,
+                Preco_Custo REAL DEFAULT 0.00,
+                Preco_Venda REAL DEFAULT 0.00
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS acessos (
+                sessao_id TEXT PRIMARY KEY,
+                ultimo_clique DATETIME
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS centros_custo (
+                nome TEXT PRIMARY KEY
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS financeiro (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Codigo TEXT,
+                Descricao TEXT,
+                tipo TEXT,
+                quantidade INTEGER,
+                valor_total REAL,
+                data DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         conn.commit()
 
 init_db()
@@ -88,10 +87,10 @@ init_db()
 @st.cache_data(ttl=300)
 def carregar_estoque():
     with get_conn() as conn:
-        with conn.cursor() as c:
-            c.execute('SELECT "Codigo", "Descricao", "Quantidade", "CC", "Preco_Custo", "Preco_Venda" FROM estoque')
-            rows = c.fetchall()
-    df = pd.DataFrame(rows, columns=['Codigo', 'Descricao', 'Quantidade', 'CC', 'Preco_Custo', 'Preco_Venda'])
+        c = conn.cursor()
+        c.execute('SELECT Codigo, Descricao, Quantidade, CC, Preco_Custo, Preco_Venda FROM estoque')
+        rows = c.fetchall()
+    df = pd.DataFrame([dict(row) for row in rows], columns=['Codigo', 'Descricao', 'Quantidade', 'CC', 'Preco_Custo', 'Preco_Venda'])
     if not df.empty:
         df['Quantidade'] = df['Quantidade'].astype(int)
         df['Preco_Custo'] = df['Preco_Custo'].astype(float)
@@ -101,23 +100,23 @@ def carregar_estoque():
 @st.cache_data
 def carregar_ccs():
     with get_conn() as conn:
-        with conn.cursor() as c:
-            c.execute("SELECT nome FROM centros_custo ORDER BY nome")
-            rows = c.fetchall()
+        c = conn.cursor()
+        c.execute("SELECT nome FROM centros_custo ORDER BY nome")
+        rows = c.fetchall()
     lista_cc = [r['nome'] for r in rows]
     if not lista_cc:
         lista_cc = ["Centro de Custo Geral"]
         with get_conn() as conn:
-            with conn.cursor() as c:
-                c.execute("INSERT INTO centros_custo (nome) VALUES (%s) ON CONFLICT DO NOTHING", ("Centro de Custo Geral",))
+            c = conn.cursor()
+            c.execute("INSERT OR IGNORE INTO centros_custo (nome) VALUES (?)", ("Centro de Custo Geral",))
             conn.commit()
     return lista_cc
 
 def buscar_descricao_por_codigo(cod):
     with get_conn() as conn:
-        with conn.cursor() as c:
-            c.execute('SELECT DISTINCT "Descricao" FROM estoque WHERE "Codigo" = %s', (cod,))
-            result = c.fetchone()
+        c = conn.cursor()
+        c.execute('SELECT DISTINCT Descricao FROM estoque WHERE Codigo = ?', (cod,))
+        result = c.fetchone()
     return result['Descricao'] if result else None
 
 def gerar_template_xlsx():
@@ -164,11 +163,7 @@ def aprovar_acao_master(chave, descricao_acao):
     if f"token_{chave}" not in st.session_state:
         st.session_state[f"token_{chave}"] = None
 
-    email_solicitante = st.text_input(
-        "📧 Seu e-mail (para identificação):",
-        key=f"email_{chave}",
-        placeholder="seunome@gmail.com"
-    )
+    email_solicitante = st.text_input("📧 Seu e-mail (para identificação):", key=f"email_{chave}", placeholder="seunome@gmail.com")
 
     if st.button(f"📩 Solicitar Liberação: {descricao_acao}", key=f"req_{chave}"):
         if not email_solicitante:
@@ -203,7 +198,7 @@ def aprovar_acao_master(chave, descricao_acao):
             st.error(f"Erro ao enviar e-mail: {e}")
 
     if st.session_state[f"token_{chave}"]:
-        token_input = st.text_input("🔑 Código enviado para Eduardo Sousa - Controladoria, solicite a ele. Código:", key=f"inp_{chave}")
+        token_input = st.text_input("🔑 Código enviado para Eduardo Sousa - Controladoria. Código:", key=f"inp_{chave}")
         if st.button("✅ Confirmar Execução", key=f"exec_{chave}"):
             if token_input == st.session_state[f"token_{chave}"]:
                 st.session_state[f"token_{chave}"] = None
@@ -217,15 +212,18 @@ if 'sessao_id' not in st.session_state:
     st.session_state.sessao_id = str(uuid.uuid4())
 
 with get_conn() as conn:
-    with conn.cursor() as c:
-        tempo_limite = datetime.now() - timedelta(minutes=TEMPO_INATIVIDADE)
-        c.execute("DELETE FROM acessos WHERE ultimo_clique < %s", (tempo_limite,))
-        c.execute("""
-            INSERT INTO acessos (sessao_id, ultimo_clique) VALUES (%s, %s)
-            ON CONFLICT (sessao_id) DO UPDATE SET ultimo_clique = EXCLUDED.ultimo_clique
-        """, (st.session_state.sessao_id, datetime.now()))
-        c.execute("SELECT COUNT(*) as total FROM acessos")
-        total_ativos = c.fetchone()['total']
+    c = conn.cursor()
+    tempo_limite = (datetime.now() - timedelta(minutes=TEMPO_INATIVIDADE)).strftime('%Y-%m-%d %H:%M:%S')
+    c.execute("DELETE FROM acessos WHERE ultimo_clique < ?", (tempo_limite,))
+    
+    agora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute("""
+        INSERT INTO acessos (sessao_id, ultimo_clique) VALUES (?, ?)
+        ON CONFLICT(sessao_id) DO UPDATE SET ultimo_clique=excluded.ultimo_clique
+    """, (st.session_state.sessao_id, agora))
+    
+    c.execute("SELECT COUNT(*) as total FROM acessos")
+    total_ativos = c.fetchone()['total']
     conn.commit()
 
 if total_ativos > LIMITE_PESSOAS:
@@ -275,8 +273,6 @@ if menu == "📊 Consulta":
       .metric-card {{ background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }}
       .metric-label {{ font-size: 0.78rem; color: #718096; font-weight: 600; margin-bottom: 4px; }}
       .metric-value {{ font-size: 1.9rem; font-weight: 700; color: #1a202c; line-height: 1.1; }}
-      
-      /* AJUSTE PARA MOBILE */
       @media (max-width: 768px) {{
         .header-container {{ grid-template-columns: 1fr; gap: 15px; padding: 15px; text-align: center; }}
         .left-logo, .right-logo {{ justify-self: center; }}
@@ -313,10 +309,10 @@ if menu == "📊 Consulta":
             df_filt['Descricao'].str.contains(busca, case=False, na=False)
         ]
 
-    # Formatar os preços para visualização
     df_exibicao = df_filt.copy()
-    df_exibicao['Preco_Custo'] = df_exibicao['Preco_Custo'].apply(formatar_moeda)
-    df_exibicao['Preco_Venda'] = df_exibicao['Preco_Venda'].apply(formatar_moeda)
+    if not df_exibicao.empty:
+        df_exibicao['Preco_Custo'] = df_exibicao['Preco_Custo'].apply(formatar_moeda)
+        df_exibicao['Preco_Venda'] = df_exibicao['Preco_Venda'].apply(formatar_moeda)
 
     st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
 
@@ -325,21 +321,17 @@ if menu == "📊 Consulta":
 # ==========================================
 elif menu == "💰 Financeiro":
     st.title("💰 Dashboard Financeiro")
-    st.markdown("Acompanhamento de entradas no caixa (vendas) e perdas de estoque.")
     
     with get_conn() as conn:
-        with conn.cursor() as cur:
-            # Total Entrada em Caixa (Vendas * Preco Venda)
-            cur.execute("SELECT COALESCE(SUM(valor_total), 0) as total FROM financeiro WHERE tipo='Venda'")
-            total_vendas = cur.fetchone()['total']
-            
-            # Total Perdido (Perdas * Preco Custo)
-            cur.execute("SELECT COALESCE(SUM(valor_total), 0) as total FROM financeiro WHERE tipo='Perda'")
-            total_perdas = cur.fetchone()['total']
-            
-            # Valor Total Alocado no Estoque Atual (Quantidade * Preco Custo)
-            cur.execute('SELECT COALESCE(SUM("Quantidade" * "Preco_Custo"), 0) as total FROM estoque WHERE "Quantidade" > 0')
-            valor_estoque_atual = cur.fetchone()['total']
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(SUM(valor_total), 0) as total FROM financeiro WHERE tipo='Venda'")
+        total_vendas = cur.fetchone()['total']
+        
+        cur.execute("SELECT COALESCE(SUM(valor_total), 0) as total FROM financeiro WHERE tipo='Perda'")
+        total_perdas = cur.fetchone()['total']
+        
+        cur.execute('SELECT COALESCE(SUM(Quantidade * Preco_Custo), 0) as total FROM estoque WHERE Quantidade > 0')
+        valor_estoque_atual = cur.fetchone()['total']
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Entrada em Caixa (Vendas)", formatar_moeda(float(total_vendas)))
@@ -349,18 +341,18 @@ elif menu == "💰 Financeiro":
     st.divider()
     st.subheader("Últimas Movimentações")
     with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute('SELECT data, tipo, "Codigo", "Descricao", quantidade, valor_total FROM financeiro ORDER BY data DESC LIMIT 50')
-            mov_rows = cur.fetchall()
+        cur = conn.cursor()
+        cur.execute('SELECT data, tipo, Codigo, Descricao, quantidade, valor_total FROM financeiro ORDER BY data DESC LIMIT 50')
+        mov_rows = cur.fetchall()
             
     if mov_rows:
-        df_mov = pd.DataFrame(mov_rows)
+        df_mov = pd.DataFrame([dict(r) for r in mov_rows])
         df_mov['data'] = pd.to_datetime(df_mov['data']).dt.strftime('%d/%m/%Y %H:%M')
         df_mov['valor_total'] = df_mov['valor_total'].astype(float).apply(formatar_moeda)
         df_mov.columns = ['Data', 'Operação', 'Código', 'Descrição', 'Qtd', 'Valor Total']
         st.dataframe(df_mov, use_container_width=True, hide_index=True)
     else:
-        st.info("Nenhuma movimentação financeira registrada até o momento.")
+        st.info("Nenhuma movimentação financeira registrada.")
 
 # ==========================================
 # TELA 2: ALMOXARIFADO
@@ -376,7 +368,6 @@ elif menu == "🔒 Almoxarifado":
 
         abas = st.tabs(abas_nomes)
 
-        # TAB 1: REGISTRO INDIVIDUAL
         with abas[0]:
             with st.form("registro", clear_on_submit=True):
                 st.markdown("**1. Informações do Produto**")
@@ -403,57 +394,55 @@ elif menu == "🔒 Almoxarifado":
                         if not desc_existente and not desc_input:
                             st.error("⛔ A Descrição é OBRIGATÓRIA para cadastrar um novo item.")
                         elif desc_existente and desc_input and desc_input.strip() != desc_existente.strip():
-                            st.error(f"⛔ Conflito! O código **{cod}** já está cadastrado como:\n\n**\"{desc_existente}\"**")
+                            st.error(f"⛔ Conflito! O código **{cod}** já está cadastrado como: **\"{desc_existente}\"**")
                         else:
                             desc_final = desc_existente if desc_existente else desc_input
                             with get_conn() as conn:
-                                with conn.cursor() as cur:
-                                    cur.execute('SELECT "Quantidade", "Preco_Custo", "Preco_Venda" FROM estoque WHERE "Codigo"=%s AND "CC"=%s', (cod, cc_sel))
-                                    res = cur.fetchone()
-                                    
-                                    if res:
-                                        p_custo_db = res['Preco_Custo']
-                                        p_venda_db = res['Preco_Venda']
+                                cur = conn.cursor()
+                                cur.execute('SELECT Quantidade, Preco_Custo, Preco_Venda FROM estoque WHERE Codigo=? AND CC=?', (cod, cc_sel))
+                                res = cur.fetchone()
+                                
+                                if res:
+                                    p_custo_db = res['Preco_Custo']
+                                    p_venda_db = res['Preco_Venda']
 
-                                        if op == "Venda":
-                                            if res['Quantidade'] < qtd:
-                                                st.error(f"⛔ FALTA DE ESTOQUE! Saldo atual: {res['Quantidade']} unidades.")
-                                            else:
-                                                cur.execute('UPDATE estoque SET "Quantidade" = "Quantidade" - %s WHERE "Codigo"=%s AND "CC"=%s', (qtd, cod, cc_sel))
-                                                cur.execute('INSERT INTO financeiro ("Codigo", "Descricao", tipo, quantidade, valor_total) VALUES (%s, %s, %s, %s, %s)', 
-                                                            (cod, desc_final, 'Venda', qtd, qtd * p_venda_db))
-                                                st.success(f"✅ Venda registrada! Valor total inserido no caixa: {formatar_moeda(qtd * p_venda_db)}")
-                                                st.cache_data.clear()
-                                                
-                                        elif op == "Perda":
-                                            if res['Quantidade'] < qtd:
-                                                st.error(f"⛔ FALTA DE ESTOQUE PARA BAIXAR PERDA! Saldo atual: {res['Quantidade']} unidades.")
-                                            else:
-                                                cur.execute('UPDATE estoque SET "Quantidade" = "Quantidade" - %s WHERE "Codigo"=%s AND "CC"=%s', (qtd, cod, cc_sel))
-                                                cur.execute('INSERT INTO financeiro ("Codigo", "Descricao", tipo, quantidade, valor_total) VALUES (%s, %s, %s, %s, %s)', 
-                                                            (cod, desc_final, 'Perda', qtd, qtd * p_custo_db))
-                                                st.success(f"✅ Perda registrada! Prejuízo somado: {formatar_moeda(qtd * p_custo_db)}")
-                                                st.cache_data.clear()
-                                                
-                                        elif op == "Entrada":
-                                            novo_custo = preco_custo if preco_custo > 0 else p_custo_db
-                                            novo_venda = preco_venda if preco_venda > 0 else p_venda_db
-                                            cur.execute('UPDATE estoque SET "Quantidade" = "Quantidade" + %s, "Preco_Custo" = %s, "Preco_Venda" = %s WHERE "Codigo"=%s AND "CC"=%s', 
-                                                        (qtd, novo_custo, novo_venda, cod, cc_sel))
-                                            st.success(f"✅ Entrada registrada. Saldo atualizado: {res['Quantidade'] + qtd}")
-                                            st.cache_data.clear()
-                                    else:
-                                        if op in ["Venda", "Perda"]:
-                                            st.error("⛔ ITEM NÃO ENCONTRADO neste Centro de Custo para realizar Venda ou Perda.")
+                                    if op == "Venda":
+                                        if res['Quantidade'] < qtd:
+                                            st.error(f"⛔ FALTA DE ESTOQUE! Saldo atual: {res['Quantidade']} unidades.")
                                         else:
-                                            # Nova entrada do zero
-                                            cur.execute('INSERT INTO estoque ("Codigo", "Descricao", "Quantidade", "CC", "Preco_Custo", "Preco_Venda") VALUES (%s, %s, %s, %s, %s, %s)', 
-                                                        (cod, desc_final, qtd, cc_sel, preco_custo, preco_venda))
-                                            st.success("✅ Item novo cadastrado com sucesso.")
+                                            cur.execute('UPDATE estoque SET Quantidade = Quantidade - ? WHERE Codigo=? AND CC=?', (qtd, cod, cc_sel))
+                                            cur.execute('INSERT INTO financeiro (Codigo, Descricao, tipo, quantidade, valor_total) VALUES (?, ?, ?, ?, ?)', 
+                                                        (cod, desc_final, 'Venda', qtd, qtd * p_venda_db))
+                                            st.success(f"✅ Venda registrada! Valor total: {formatar_moeda(qtd * p_venda_db)}")
                                             st.cache_data.clear()
-                                conn.commit()
+                                            
+                                    elif op == "Perda":
+                                        if res['Quantidade'] < qtd:
+                                            st.error(f"⛔ FALTA DE ESTOQUE! Saldo atual: {res['Quantidade']} unidades.")
+                                        else:
+                                            cur.execute('UPDATE estoque SET Quantidade = Quantidade - ? WHERE Codigo=? AND CC=?', (qtd, cod, cc_sel))
+                                            cur.execute('INSERT INTO financeiro (Codigo, Descricao, tipo, quantidade, valor_total) VALUES (?, ?, ?, ?, ?)', 
+                                                        (cod, desc_final, 'Perda', qtd, qtd * p_custo_db))
+                                            st.success(f"✅ Perda registrada! Prejuízo somado: {formatar_moeda(qtd * p_custo_db)}")
+                                            st.cache_data.clear()
+                                            
+                                    elif op == "Entrada":
+                                        novo_custo = preco_custo if preco_custo > 0 else p_custo_db
+                                        novo_venda = preco_venda if preco_venda > 0 else p_venda_db
+                                        cur.execute('UPDATE estoque SET Quantidade = Quantidade + ?, Preco_Custo = ?, Preco_Venda = ? WHERE Codigo=? AND CC=?', 
+                                                    (qtd, novo_custo, novo_venda, cod, cc_sel))
+                                        st.success(f"✅ Entrada registrada. Saldo atualizado: {res['Quantidade'] + qtd}")
+                                        st.cache_data.clear()
+                                else:
+                                    if op in ["Venda", "Perda"]:
+                                        st.error("⛔ ITEM NÃO ENCONTRADO para realizar Venda ou Perda.")
+                                    else:
+                                        cur.execute('INSERT INTO estoque (Codigo, Descricao, Quantidade, CC, Preco_Custo, Preco_Venda) VALUES (?, ?, ?, ?, ?, ?)', 
+                                                    (cod, desc_final, qtd, cc_sel, preco_custo, preco_venda))
+                                        st.success("✅ Item novo cadastrado com sucesso.")
+                                        st.cache_data.clear()
+                            conn.commit()
 
-        # TAB 2: CARGA EM MASSA
         with abas[1]:
             st.info("Upload de arquivo Excel (.xlsx) com colunas: `Codigo` | `Descricao` | `Quantidade` | `CC` | `Preco_Custo` | `Preco_Venda`")
             st.download_button("⬇️ Template Inventário", gerar_template_xlsx(), "template_inventario.xlsx")
@@ -472,7 +461,6 @@ elif menu == "🔒 Almoxarifado":
                             df_upload['CC']         = df_upload['CC'].astype(str).str.strip()
                             df_upload['Quantidade'] = pd.to_numeric(df_upload['Quantidade'], errors='coerce')
                             
-                            # Tratamento de preços na planilha (se não existirem, seta como 0)
                             if 'Preco_Custo' not in df_upload.columns: df_upload['Preco_Custo'] = 0.0
                             if 'Preco_Venda' not in df_upload.columns: df_upload['Preco_Venda'] = 0.0
                             
@@ -489,32 +477,28 @@ elif menu == "🔒 Almoxarifado":
                                 st.error(f"⛔ IMPORTAÇÃO BLOQUEADA! CCs não encontrados: **{', '.join(ccs_invalidos)}**.")
                             else:
                                 with get_conn() as conn:
-                                    with conn.cursor() as cur:
-                                        cur.execute('SELECT "Codigo", "CC" FROM estoque')
-                                        db_set = set((r['Codigo'], r['CC']) for r in cur.fetchall())
+                                    cur = conn.cursor()
+                                    cur.execute('SELECT Codigo, CC FROM estoque')
+                                    db_set = set((r['Codigo'], r['CC']) for r in cur.fetchall())
 
-                                        inserts, updates = [], []
-                                        for _, row in df_upload.iterrows():
-                                            cod_r  = row['Codigo']
-                                            desc_r = row['Descricao']
-                                            cc_r   = row['CC']
-                                            qtd_r  = row['Quantidade']
-                                            cust_r = row['Preco_Custo']
-                                            vend_r = row['Preco_Venda']
+                                    inserts, updates = [], []
+                                    for _, row in df_upload.iterrows():
+                                        cod_r, desc_r, cc_r, qtd_r = row['Codigo'], row['Descricao'], row['CC'], row['Quantidade']
+                                        cust_r, vend_r = row['Preco_Custo'], row['Preco_Venda']
 
-                                            if (cod_r, cc_r) not in db_set and (not desc_r or desc_r.lower() == 'nan'):
-                                                continue
-                                            if (cod_r, cc_r) in db_set:
-                                                updates.append((qtd_r, cust_r, vend_r, cod_r, cc_r))
-                                            else:
-                                                inserts.append((cod_r, desc_r, qtd_r, cc_r, cust_r, vend_r))
-                                                db_set.add((cod_r, cc_r))
+                                        if (cod_r, cc_r) not in db_set and (not desc_r or desc_r.lower() == 'nan'):
+                                            continue
+                                        if (cod_r, cc_r) in db_set:
+                                            updates.append((qtd_r, cust_r, vend_r, cod_r, cc_r))
+                                        else:
+                                            inserts.append((cod_r, desc_r, qtd_r, cc_r, cust_r, vend_r))
+                                            db_set.add((cod_r, cc_r))
 
-                                        if inserts:
-                                            cur.executemany('INSERT INTO estoque ("Codigo","Descricao","Quantidade","CC", "Preco_Custo", "Preco_Venda") VALUES (%s,%s,%s,%s,%s,%s)', inserts)
-                                        if updates:
-                                            cur.executemany('UPDATE estoque SET "Quantidade" = "Quantidade" + %s, "Preco_Custo" = GREATEST("Preco_Custo", %s), "Preco_Venda" = GREATEST("Preco_Venda", %s) WHERE "Codigo"=%s AND "CC"=%s', updates)
-                                    conn.commit()
+                                    if inserts:
+                                        cur.executemany('INSERT INTO estoque (Codigo,Descricao,Quantidade,CC,Preco_Custo,Preco_Venda) VALUES (?,?,?,?,?,?)', inserts)
+                                    if updates:
+                                        cur.executemany('UPDATE estoque SET Quantidade = Quantidade + ?, Preco_Custo = MAX(Preco_Custo, ?), Preco_Venda = MAX(Preco_Venda, ?) WHERE Codigo=? AND CC=?', updates)
+                                conn.commit()
 
                                 st.success(f"✅ Importação concluída! {len(inserts)} novos, {len(updates)} atualizados.")
                                 st.cache_data.clear()
@@ -522,21 +506,19 @@ elif menu == "🔒 Almoxarifado":
                 except Exception as e:
                     st.error(f"Erro: {e}")
 
-        # ÁREA MASTER
         if senha == SENHA_ZERAR_ESTOQUE:
             with abas[2]:
                 st.subheader("🗑️ Excluir Item do Banco")
-                st.warning("Esta ação apagará o código de todos os CCs e NÃO afetará o histórico financeiro salvo.")
                 cod_excluir = st.text_input("Digite o Código do item que deseja apagar:")
                 if cod_excluir and aprovar_acao_master("del_item", f"Excluir código {cod_excluir}"):
                     with get_conn() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute('SELECT * FROM estoque WHERE "Codigo"=%s', (cod_excluir,))
-                            if cur.fetchone():
-                                cur.execute('DELETE FROM estoque WHERE "Codigo"=%s', (cod_excluir,))
-                                st.success(f"✅ Código **{cod_excluir}** apagado!")
-                            else:
-                                st.error("⛔ Código não encontrado.")
+                        cur = conn.cursor()
+                        cur.execute('SELECT * FROM estoque WHERE Codigo=?', (cod_excluir,))
+                        if cur.fetchone():
+                            cur.execute('DELETE FROM estoque WHERE Codigo=?', (cod_excluir,))
+                            st.success(f"✅ Código **{cod_excluir}** apagado!")
+                        else:
+                            st.error("⛔ Código não encontrado.")
                         conn.commit()
                     st.cache_data.clear()
 
@@ -547,9 +529,9 @@ elif menu == "🔒 Almoxarifado":
                     novo_cc = st.text_input("Nome:")
                     if novo_cc and aprovar_acao_master("new_cc", f"Criar CC: {novo_cc}"):
                         with get_conn() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("INSERT INTO centros_custo (nome) VALUES (%s) ON CONFLICT DO NOTHING", (novo_cc,))
-                        conn.commit()
+                            cur = conn.cursor()
+                            cur.execute("INSERT OR IGNORE INTO centros_custo (nome) VALUES (?)", (novo_cc,))
+                            conn.commit()
                         st.success("Centro de Custo cadastrado!")
                         st.cache_data.clear()
                         st.rerun()
@@ -560,50 +542,14 @@ elif menu == "🔒 Almoxarifado":
                     cc_novo   = st.text_input("Para (Novo Nome):")
                     if cc_novo and cc_antigo and aprovar_acao_master("rename_cc", f"Renomear {cc_antigo} → {cc_novo}"):
                         with get_conn() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("INSERT INTO centros_custo (nome) VALUES (%s) ON CONFLICT DO NOTHING", (cc_novo,))
-                                cur.execute('UPDATE estoque SET "CC" = %s WHERE "CC" = %s', (cc_novo, cc_antigo))
-                                cur.execute("DELETE FROM centros_custo WHERE nome = %s", (cc_antigo,))
+                            cur = conn.cursor()
+                            cur.execute("INSERT OR IGNORE INTO centros_custo (nome) VALUES (?)", (cc_novo,))
+                            cur.execute('UPDATE estoque SET CC = ? WHERE CC = ?', (cc_novo, cc_antigo))
+                            cur.execute("DELETE FROM centros_custo WHERE nome = ?", (cc_antigo,))
                             conn.commit()
                         st.success("Centro de Custo renomeado!")
                         st.cache_data.clear()
                         st.rerun()
-
-                st.divider()
-                st.subheader("📂 De/Para em Massa")
-                st.download_button("⬇️ Template De/Para", gerar_template_depara(), "template_depara.xlsx")
-                arq_depara = st.file_uploader("Arquivo De/Para (.xlsx):", type=["xlsx"])
-
-                if arq_depara and aprovar_acao_master("depara_massa", "Processar De/Para em massa"):
-                    df_dp = pd.read_excel(arq_depara)
-                    if 'De' in df_dp.columns and 'Para' in df_dp.columns:
-                        with get_conn() as conn:
-                            with conn.cursor() as cur:
-                                for _, row in df_dp.iterrows():
-                                    de   = str(row['De']).strip()
-                                    para = str(row['Para']).strip()
-                                    if de != 'nan' and para != 'nan':
-                                        cur.execute("INSERT INTO centros_custo (nome) VALUES (%s) ON CONFLICT DO NOTHING", (para,))
-                                        cur.execute('UPDATE estoque SET "CC" = %s WHERE "CC" = %s', (para, de))
-                                        cur.execute("DELETE FROM centros_custo WHERE nome = %s", (de,))
-                            conn.commit()
-                        st.success("De/Para em massa concluído!")
-                        st.cache_data.clear()
-                        st.rerun()
-                
-                st.divider()
-                st.subheader("➕ Inclusão em Massa de Centros de Custo")
-                ccs_massa = st.text_area("Cole a lista de Centros de Custo (um por linha):")
-                if ccs_massa and aprovar_acao_master("add_cc_massa", "Adicionar CCs em Massa"):
-                    novos_ccs = [c.strip() for c in ccs_massa.split('\n') if c.strip()]
-                    with get_conn() as conn:
-                        with conn.cursor() as cur:
-                            for cc in novos_ccs:
-                                cur.execute("INSERT INTO centros_custo (nome) VALUES (%s) ON CONFLICT DO NOTHING", (cc,))
-                        conn.commit()
-                    st.success(f"✅ {len(novos_ccs)} Centros de Custo processados com sucesso!")
-                    st.cache_data.clear()
-                    st.rerun()
 
             with abas[4]:
                 st.subheader("⚠️ Área de Risco - Acesso Master")
@@ -615,16 +561,16 @@ elif menu == "🔒 Almoxarifado":
 
                 if aprovar_acao_master("limpeza", f"Limpeza de Banco: {opcao}"):
                     with get_conn() as conn:
-                        with conn.cursor() as cur:
-                            if "1️⃣" in opcao:
-                                cur.execute('UPDATE estoque SET "Quantidade" = 0')
-                                st.success("Quantidades zeradas com sucesso!")
-                            elif "2️⃣" in opcao:
-                                cur.execute("DELETE FROM estoque")
-                                st.success("Todos os itens de estoque apagados!")
-                            elif "3️⃣" in opcao:
-                                cur.execute("DELETE FROM financeiro")
-                                st.success("Histórico financeiro limpo com sucesso!")
+                        cur = conn.cursor()
+                        if "1️⃣" in opcao:
+                            cur.execute('UPDATE estoque SET Quantidade = 0')
+                            st.success("Quantidades zeradas!")
+                        elif "2️⃣" in opcao:
+                            cur.execute("DELETE FROM estoque")
+                            st.success("Todos os itens de estoque apagados!")
+                        elif "3️⃣" in opcao:
+                            cur.execute("DELETE FROM financeiro")
+                            st.success("Histórico financeiro limpo!")
                         conn.commit()
                     st.cache_data.clear()
                     st.rerun()
