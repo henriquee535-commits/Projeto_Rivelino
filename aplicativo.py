@@ -644,7 +644,7 @@ elif menu == "🔒 Financeiro":
             margem      = (lucro / receita * 100) if receita > 0 else 0
             tot_perdas  = df_pr['valor_total'].sum()
             resultado   = lucro - tot_perdas
-            margem líquida = (resultado / receita * 100) if receita > 0 else 0
+            margem liquida = (resultado / receita * 100) if receita > 0 else 0
 
             with get_conn() as conn:
                 cur = conn.cursor()
@@ -662,7 +662,7 @@ elif menu == "🔒 Financeiro":
             
             k4, k5, k6 = st.columns(3)
             k4.metric("🗑️ Perdas",             formatar_moeda(tot_perdas))
-            k5.metric("✅ Resultado Líquido",  formatar_moeda(resultado), delta=f"{margem:.1f}% margem líquida")
+            k5.metric("✅ Resultado Líquido",  formatar_moeda(resultado), delta=f"{margem:.1f}% margem liquida")
             k6.metric("📦 Valor em Estoque",   formatar_moeda(val_estoque))
 
             st.divider()
