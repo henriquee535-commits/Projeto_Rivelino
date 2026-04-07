@@ -307,7 +307,7 @@ if menu == "📊 Consulta":
       .mv.alerta{{color:#c05621;}}.mv.perigo{{color:#c53030;}}
       @media(max-width:768px){{.hdr{{grid-template-columns:1fr;gap:15px;padding:15px;text-align:center;}}.ll{{justify-self:center;padding-right:0;}}.tb{{text-align:center;}}.mg{{grid-template-columns:repeat(2,1fr);gap:8px;}}}}
     </style></head><body>
-    <div class="hdr"><div class="ll">{img1}</div><div class="tb"><h1>INVENTÁRIO JOSÉ RIVELINO</h1><p>ALMOXARIFADO</p></div></div>
+    <div class="hdr"><div class="ll">{img1}</div><div class="tb"><h1>INVENTÁRIO SUPERMERCADO ECONÔMICO</h1><p>ESTOQUE</p></div></div>
     <div class="mg">
       <div class="mc"><div class="ml">📦 Total de Peças</div><div class="mv">{tp}</div></div>
       <div class="mc"><div class="ml">🏷️ Itens Únicos</div><div class="mv">{ti}</div></div>
