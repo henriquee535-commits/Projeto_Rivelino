@@ -662,7 +662,7 @@ elif menu == "🔒 Financeiro":
             
             k4, k5, k6 = st.columns(3)
             k4.metric("🗑️ Perdas",             formatar_moeda(tot_perdas))
-            k5.metric("✅ Resultado Líquido",  formatar_moeda(resultado), delta=f"{margem:.1f}% margem_liquida")
+            k5.metric("✅ Resultado Líquido",  formatar_moeda(resultado), delta=f"{margem_liquida:.1f}% margem_liquida")
             k6.metric("📦 Valor em Estoque",   formatar_moeda(val_estoque))
 
             st.divider()
