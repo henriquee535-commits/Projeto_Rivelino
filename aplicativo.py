@@ -643,8 +643,8 @@ elif menu == "🔒 Financeiro":
             lucro       = receita - custo_vend
             margem      = (lucro / receita * 100) if receita > 0 else 0
             tot_perdas  = df_pr['valor_total'].sum()
-            margem líquida = (lucro-tot_perdas)/receita*100) if receita > 0 else 0
             resultado   = lucro - tot_perdas
+            margem líquida = (resultado / receita * 100) if receita > 0 else 0
 
             with get_conn() as conn:
                 cur = conn.cursor()
