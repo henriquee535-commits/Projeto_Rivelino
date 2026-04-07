@@ -265,7 +265,7 @@ df = carregar_estoque()
 # NAVEGAÇÃO
 # ==========================================
 st.sidebar.title("Navegação")
-menu = st.sidebar.radio("Ir para:", ["📊 Consulta", "📥 Entrada", "📤 Saída", "🔒 Administrativo", "🔒 Financeiro"])
+menu = st.sidebar.radio("Ir para:", ["📊 Consulta", "📥 Entrada", "📤 Saída", "🔒 Segurança", "🔒 Financeiro"])
 st.sidebar.divider()
 st.sidebar.markdown(f"🟢 **{total_ativos}/{LIMITE_PESSOAS}** pessoas online")
 
@@ -573,7 +573,7 @@ elif menu == "📤 Saída":
             st.cache_data.clear()
 
 # ==========================================
-# TELA 4 — ADMINISTRATIVO
+# TELA 4 — SEGURANÇA
 # ==========================================
 elif menu == "🔒 Segurança":
     st.title("🔒 Segurança Supermercado Econômico")
@@ -619,7 +619,7 @@ elif menu == "🔒 Segurança":
 # TELA 5 — FINANCEIRO
 # ==========================================
 elif menu == "🔒 Financeiro":
-    st.title("🔒 Sinanceiro Supermercado Econômico")
+    st.title("🔒 Financeiro Supermercado Econômico")
     
     senha = st.text_input("Senha:", type="password", key="senha_fin")
 
@@ -643,6 +643,7 @@ elif menu == "🔒 Financeiro":
             lucro       = receita - custo_vend
             margem      = (lucro / receita * 100) if receita > 0 else 0
             tot_perdas  = df_pr['valor_total'].sum()
+            margem líquida = (lucro-tot_perdas)/receita*100) if receita > 0 else 0
             resultado   = lucro - tot_perdas
 
             with get_conn() as conn:
