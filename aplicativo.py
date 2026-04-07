@@ -13,7 +13,7 @@ import random
 # ==========================================
 # CONFIGURAÇÃO DA PÁGINA
 # ==========================================
-st.set_page_config(page_title="Inventário José Rivelino", layout="wide", page_icon="📦")
+st.set_page_config(page_title="Inventário Supermercado Econômico", layout="wide", page_icon="📦")
 
 SENHA_ACESSO        = st.secrets["SENHA_ACESSO"]
 SENHA_ZERAR_ESTOQUE = st.secrets["SENHA_ZERAR_ESTOQUE"]
@@ -575,8 +575,8 @@ elif menu == "📤 Saída":
 # ==========================================
 # TELA 4 — ADMINISTRATIVO
 # ==========================================
-elif menu == "🔒 Administrativo":
-    st.title("🔒 Área Administrativa")
+elif menu == "🔒 Segurança":
+    st.title("🔒 Segurança Supermercado Econômico")
     senha = st.text_input("Senha:", type="password", key="senha_admin")
 
     if senha == SENHA_ZERAR_ESTOQUE:
@@ -619,7 +619,7 @@ elif menu == "🔒 Administrativo":
 # TELA 5 — FINANCEIRO
 # ==========================================
 elif menu == "🔒 Financeiro":
-    st.title("🔒 Dashboard Financeiro")
+    st.title("🔒 Sinanceiro Supermercado Econômico")
     
     senha = st.text_input("Senha:", type="password", key="senha_fin")
 
@@ -661,7 +661,7 @@ elif menu == "🔒 Financeiro":
             
             k4, k5, k6 = st.columns(3)
             k4.metric("🗑️ Perdas",             formatar_moeda(tot_perdas))
-            k5.metric("✅ Resultado Líquido",  formatar_moeda(resultado))
+            k5.metric("✅ Resultado Líquido",  formatar_moeda(resultado), delta=f"{margem:.1f}% margem líquida")
             k6.metric("📦 Valor em Estoque",   formatar_moeda(val_estoque))
 
             st.divider()
