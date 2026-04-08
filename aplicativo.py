@@ -1,7 +1,8 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import uuid
 from datetime import datetime, timedelta, date
 import io
@@ -17,9 +18,9 @@ st.set_page_config(page_title="Inventário Supermercado Econômico", layout="wid
 
 SENHA_ACESSO        = st.secrets["SENHA_ACESSO"]
 SENHA_ZERAR_ESTOQUE = st.secrets["SENHA_ZERAR_ESTOQUE"]
+DATABASE_URL        = st.secrets["DATABASE_URL"]
 LIMITE_PESSOAS      = 20
 TEMPO_INATIVIDADE   = 15
-DB_NAME             = "almoxarifado.db"
 
 st.markdown("""
 <style>
@@ -37,55 +38,44 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
 """, unsafe_allow_html=True)
 
 # ==========================================
-# BANCO DE DADOS
+# BANCO DE DADOS — POSTGRESQL (SUPABASE)
 # ==========================================
 def get_conn():
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
 
 def init_db():
     with get_conn() as conn:
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS estoque (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                Codigo       TEXT,
-                Descricao    TEXT,
-                Quantidade   INTEGER,
-                Preco_Custo  REAL DEFAULT 0.00,
-                Preco_Venda  REAL DEFAULT 0.00,
-                Vencimento   TEXT
-            )
-        ''')
-        for col, typedef in [("Vencimento","TEXT"),("Preco_Custo","REAL DEFAULT 0"),("Preco_Venda","REAL DEFAULT 0")]:
-            try:
-                c.execute(f"ALTER TABLE estoque ADD COLUMN {col} {typedef}")
-            except sqlite3.OperationalError:
-                pass
-
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS acessos (
-                sessao_id     TEXT PRIMARY KEY,
-                ultimo_clique DATETIME
-            )
-        ''')
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS financeiro (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                Codigo           TEXT,
-                Descricao        TEXT,
-                tipo             TEXT,
-                quantidade       INTEGER,
-                preco_custo_unit REAL DEFAULT 0,
-                valor_total      REAL,
-                data             DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        try:
-            c.execute("ALTER TABLE financeiro ADD COLUMN preco_custo_unit REAL DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
+        with conn.cursor() as c:
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS estoque (
+                    id           SERIAL PRIMARY KEY,
+                    "Codigo"     TEXT,
+                    "Descricao"  TEXT,
+                    "Quantidade" INTEGER,
+                    "Preco_Custo" REAL DEFAULT 0.00,
+                    "Preco_Venda" REAL DEFAULT 0.00,
+                    "Vencimento" TEXT
+                )
+            ''')
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS acessos (
+                    sessao_id     TEXT PRIMARY KEY,
+                    ultimo_clique TIMESTAMP
+                )
+            ''')
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS financeiro (
+                    id               SERIAL PRIMARY KEY,
+                    "Codigo"         TEXT,
+                    "Descricao"      TEXT,
+                    tipo             TEXT,
+                    quantidade       INTEGER,
+                    preco_custo_unit REAL DEFAULT 0,
+                    valor_total      REAL,
+                    data             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
         conn.commit()
 
 init_db()
@@ -122,9 +112,9 @@ def logo_para_base64(path):
 
 def buscar_item_por_codigo(cod):
     with get_conn() as conn:
-        c = conn.cursor()
-        c.execute('SELECT DISTINCT Descricao FROM estoque WHERE Codigo = ?', (cod,))
-        r = c.fetchone()
+        with conn.cursor() as c:
+            c.execute('SELECT DISTINCT "Descricao" FROM estoque WHERE "Codigo" = %s', (cod,))
+            r = c.fetchone()
     return r['Descricao'] if r else None
 
 def gerar_template_xlsx():
@@ -150,20 +140,20 @@ def gerar_excel_download(dataframe, nome_aba="Estoque"):
 def processar_vencidos_automatico():
     hoje = date.today().isoformat()
     with get_conn() as conn:
-        c = conn.cursor()
-        c.execute('''
-            SELECT id, Codigo, Descricao, Quantidade, Preco_Custo FROM estoque
-            WHERE Vencimento IS NOT NULL AND Vencimento != ''
-              AND Vencimento < ? AND Quantidade > 0
-        ''', (hoje,))
-        vencidos = c.fetchall()
-        for item in vencidos:
-            vp = item['Quantidade'] * item['Preco_Custo']
+        with conn.cursor() as c:
             c.execute('''
-                INSERT INTO financeiro (Codigo,Descricao,tipo,quantidade,preco_custo_unit,valor_total)
-                VALUES (?,?,'Perda',?,?,?)
-            ''', (item['Codigo'], item['Descricao'], item['Quantidade'], item['Preco_Custo'], vp))
-            c.execute('UPDATE estoque SET Quantidade=0 WHERE id=?', (item['id'],))
+                SELECT id, "Codigo", "Descricao", "Quantidade", "Preco_Custo" FROM estoque
+                WHERE "Vencimento" IS NOT NULL AND "Vencimento" != ''
+                  AND "Vencimento" < %s AND "Quantidade" > 0
+            ''', (hoje,))
+            vencidos = c.fetchall()
+            for item in vencidos:
+                vp = item['Quantidade'] * item['Preco_Custo']
+                c.execute('''
+                    INSERT INTO financeiro ("Codigo","Descricao",tipo,quantidade,preco_custo_unit,valor_total)
+                    VALUES (%s,%s,'Perda',%s,%s,%s)
+                ''', (item['Codigo'], item['Descricao'], item['Quantidade'], item['Preco_Custo'], vp))
+                c.execute('UPDATE estoque SET "Quantidade"=0 WHERE id=%s', (item['id'],))
         conn.commit()
     return vencidos
 
@@ -173,9 +163,9 @@ def processar_vencidos_automatico():
 @st.cache_data(ttl=300)
 def carregar_estoque():
     with get_conn() as conn:
-        c = conn.cursor()
-        c.execute('SELECT Codigo,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento FROM estoque')
-        rows = c.fetchall()
+        with conn.cursor() as c:
+            c.execute('SELECT "Codigo","Descricao","Quantidade","Preco_Custo","Preco_Venda","Vencimento" FROM estoque')
+            rows = c.fetchall()
     df = pd.DataFrame([dict(r) for r in rows],
                       columns=['Codigo','Descricao','Quantidade','Preco_Custo','Preco_Venda','Vencimento'])
     if not df.empty:
@@ -188,11 +178,12 @@ def carregar_estoque():
 @st.cache_data(ttl=60)
 def carregar_financeiro():
     with get_conn() as conn:
-        c = conn.cursor()
-        c.execute('SELECT id,Codigo,Descricao,tipo,quantidade,preco_custo_unit,valor_total,data FROM financeiro ORDER BY data DESC')
-        rows = c.fetchall()
+        with conn.cursor() as c:
+            c.execute('SELECT id,"Codigo","Descricao",tipo,quantidade,preco_custo_unit,valor_total,data FROM financeiro ORDER BY data DESC')
+            rows = c.fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if not df.empty:
+        df.rename(columns={'Codigo':'Codigo','Descricao':'Descricao'}, inplace=True)
         df['data']             = pd.to_datetime(df['data'])
         df['valor_total']      = df['valor_total'].astype(float)
         df['preco_custo_unit'] = df['preco_custo_unit'].astype(float)
@@ -213,7 +204,7 @@ def aprovar_acao_master(chave, descricao_acao):
         st.session_state[f"token_{chave}"] = codigo
         try:
             rem  = st.secrets["email"]["remetente"]
-            pwd  = st.secrets["email"]["senha"] # Senha de APP do Gmail
+            pwd  = st.secrets["email"]["senha"]
             dest = st.secrets["email"]["destinatario"]
             msg  = MIMEText(f"Solicitante: {email_sol}\nAção: {descricao_acao}\nCódigo: {codigo}")
             msg['Subject'] = 'Aprovação - Almoxarifado'
@@ -239,14 +230,16 @@ if 'sessao_id' not in st.session_state:
     st.session_state.sessao_id = str(uuid.uuid4())
 
 with get_conn() as conn:
-    c = conn.cursor()
-    lim = (datetime.now() - timedelta(minutes=TEMPO_INATIVIDADE)).strftime('%Y-%m-%d %H:%M:%S')
-    c.execute("DELETE FROM acessos WHERE ultimo_clique < ?", (lim,))
-    agora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    c.execute("INSERT INTO acessos (sessao_id,ultimo_clique) VALUES (?,?) ON CONFLICT(sessao_id) DO UPDATE SET ultimo_clique=excluded.ultimo_clique",
-              (st.session_state.sessao_id, agora))
-    c.execute("SELECT COUNT(*) as total FROM acessos")
-    total_ativos = c.fetchone()['total']
+    with conn.cursor() as c:
+        lim = (datetime.now() - timedelta(minutes=TEMPO_INATIVIDADE)).strftime('%Y-%m-%d %H:%M:%S')
+        c.execute("DELETE FROM acessos WHERE ultimo_clique < %s", (lim,))
+        agora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        c.execute("""
+            INSERT INTO acessos (sessao_id, ultimo_clique) VALUES (%s, %s)
+            ON CONFLICT (sessao_id) DO UPDATE SET ultimo_clique = EXCLUDED.ultimo_clique
+        """, (st.session_state.sessao_id, agora))
+        c.execute("SELECT COUNT(*) as total FROM acessos")
+        total_ativos = c.fetchone()['total']
     conn.commit()
 
 if total_ativos > LIMITE_PESSOAS:
@@ -316,11 +309,11 @@ if menu == "📊 Consulta":
     </div></body></html>""", height=330, scrolling=False)
 
     st.divider()
-    
+
     col_busca, col_btn = st.columns([3, 1])
     busca = col_busca.text_input("🔍 Pesquisar Código ou Descrição:")
     df_f = df_ativos.copy()
-    
+
     if busca:
         df_f = df_f[df_f['Codigo'].astype(str).str.contains(busca, case=False) |
                     df_f['Descricao'].str.contains(busca, case=False, na=False)]
@@ -328,8 +321,7 @@ if menu == "📊 Consulta":
     if not df_f.empty:
         df_f['_dias'] = df_f['Vencimento'].apply(lambda v: (v.date()-hoje).days if pd.notna(v) else 99999)
         df_f = df_f.sort_values('_dias')
-        
-        # Botão de Download
+
         df_export = df_f.copy()
         df_export['Vencimento'] = df_export['Vencimento'].dt.strftime('%d/%m/%Y')
         df_export = df_export.drop(columns=['_dias'])
@@ -344,7 +336,7 @@ if menu == "📊 Consulta":
             'ok':             ('#f0fff4','#276749','🟢'),
             'sem_vencimento': ('#f7fafc','#718096','⚪'),
         }
-        
+
         def linha(row):
             d = None if row['_dias']==99999 else row['_dias']
             st_, lbl = status_vencimento(d)
@@ -356,9 +348,9 @@ if menu == "📊 Consulta":
                     f'<td style="text-align:center;">{formatar_moeda(row["Preco_Venda"])}</td>'
                     f'<td style="text-align:center;color:{fg};font-weight:600;">{ic} {vs}</td>'
                     f'<td style="text-align:center;color:{fg};font-weight:600;font-size:.85rem;">{lbl}</td></tr>')
-                    
+
         linhas = "\n".join(df_f.apply(linha, axis=1))
-        
+
         components.html(f"""
         <style>
           @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&display=swap');
@@ -383,7 +375,7 @@ if menu == "📊 Consulta":
 # ==========================================
 elif menu == "📥 Entrada":
     st.title("📥 Entrada de Itens")
-    
+
     abas = st.tabs(["📝 Registro Individual", "📤 Carga em Massa"])
 
     with abas[0]:
@@ -418,19 +410,19 @@ elif menu == "📥 Entrada":
                         df2 = de if de else desc_input
                         vs  = venc_in.isoformat()
                         with get_conn() as conn:
-                            cur = conn.cursor()
-                            cur.execute('SELECT id,Quantidade,Preco_Custo,Preco_Venda FROM estoque WHERE Codigo=? AND Vencimento=?', (cod,vs))
-                            res = cur.fetchone()
-                            if res:
-                                nc = preco_custo if preco_custo>0 else res['Preco_Custo']
-                                nv = preco_venda if preco_venda>0 else res['Preco_Venda']
-                                cur.execute('UPDATE estoque SET Quantidade=Quantidade+?,Preco_Custo=?,Preco_Venda=?,Vencimento=? WHERE id=?',
-                                            (qtd,nc,nv,vs,res['id']))
-                                st.success(f"✅ Entrada registrada. Novo saldo: {res['Quantidade']+qtd}")
-                            else:
-                                cur.execute('INSERT INTO estoque (Codigo,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento) VALUES (?,?,?,?,?,?)',
-                                            (cod,df2,qtd,preco_custo,preco_venda,vs))
-                                st.success("✅ Novo item cadastrado.")
+                            with conn.cursor() as cur:
+                                cur.execute('SELECT id,"Quantidade","Preco_Custo","Preco_Venda" FROM estoque WHERE "Codigo"=%s AND "Vencimento"=%s', (cod, vs))
+                                res = cur.fetchone()
+                                if res:
+                                    nc = preco_custo if preco_custo > 0 else res['Preco_Custo']
+                                    nv = preco_venda if preco_venda > 0 else res['Preco_Venda']
+                                    cur.execute('UPDATE estoque SET "Quantidade"="Quantidade"+%s,"Preco_Custo"=%s,"Preco_Venda"=%s,"Vencimento"=%s WHERE id=%s',
+                                                (qtd, nc, nv, vs, res['id']))
+                                    st.success(f"✅ Entrada registrada. Novo saldo: {res['Quantidade']+qtd}")
+                                else:
+                                    cur.execute('INSERT INTO estoque ("Codigo","Descricao","Quantidade","Preco_Custo","Preco_Venda","Vencimento") VALUES (%s,%s,%s,%s,%s,%s)',
+                                                (cod, df2, qtd, preco_custo, preco_venda, vs))
+                                    st.success("✅ Novo item cadastrado.")
                             conn.commit()
                         st.cache_data.clear()
 
@@ -449,10 +441,7 @@ elif menu == "📥 Entrada":
                         du['Codigo']    = du['Codigo'].astype(str).str.strip()
                         du['Descricao'] = du['Descricao'].astype(str).str.strip()
                         du['Quantidade']= pd.to_numeric(du['Quantidade'], errors='coerce')
-                        
-                        # Converte formato brasileiro para salvar no banco (ISO)
                         du['Vencimento'] = pd.to_datetime(du['Vencimento'], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
-                        
                         for col in ['Preco_Custo','Preco_Venda']:
                             if col not in du.columns: du[col]=0.0
                             du[col] = pd.to_numeric(du[col], errors='coerce').fillna(0.0)
@@ -460,16 +449,25 @@ elif menu == "📥 Entrada":
                         du = du[du['Quantidade']>0]; du['Quantidade']=du['Quantidade'].astype(int)
                         du = du[~du['Codigo'].isin(['nan',''])]
                         with get_conn() as conn:
-                            cur = conn.cursor()
-                            cur.execute('SELECT Codigo,Vencimento FROM estoque')
-                            dbs = set((r['Codigo'],r['Vencimento']) for r in cur.fetchall())
-                            ins,upd=[],[]
-                            for _,row in du.iterrows():
-                                k=(row['Codigo'],row['Vencimento'])
-                                if k in dbs: upd.append((row['Quantidade'],row['Preco_Custo'],row['Preco_Venda'],row['Codigo'],row['Vencimento']))
-                                else: ins.append((row['Codigo'],row['Descricao'],row['Quantidade'],row['Preco_Custo'],row['Preco_Venda'],row['Vencimento'])); dbs.add(k)
-                            if ins: cur.executemany('INSERT INTO estoque (Codigo,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento) VALUES (?,?,?,?,?,?)',ins)
-                            if upd: cur.executemany('UPDATE estoque SET Quantidade=Quantidade+?,Preco_Custo=MAX(Preco_Custo,?),Preco_Venda=MAX(Preco_Venda,?) WHERE Codigo=? AND Vencimento=?',upd)
+                            with conn.cursor() as cur:
+                                cur.execute('SELECT "Codigo","Vencimento" FROM estoque')
+                                dbs = set((r['Codigo'], r['Vencimento']) for r in cur.fetchall())
+                                ins, upd = [], []
+                                for _, row in du.iterrows():
+                                    k = (row['Codigo'], row['Vencimento'])
+                                    if k in dbs:
+                                        upd.append((row['Quantidade'], row['Preco_Custo'], row['Preco_Venda'], row['Codigo'], row['Vencimento']))
+                                    else:
+                                        ins.append((row['Codigo'], row['Descricao'], row['Quantidade'], row['Preco_Custo'], row['Preco_Venda'], row['Vencimento']))
+                                        dbs.add(k)
+                                if ins:
+                                    cur.executemany('INSERT INTO estoque ("Codigo","Descricao","Quantidade","Preco_Custo","Preco_Venda","Vencimento") VALUES (%s,%s,%s,%s,%s,%s)', ins)
+                                if upd:
+                                    for u in upd:
+                                        cur.execute('''UPDATE estoque SET "Quantidade"="Quantidade"+%s,
+                                            "Preco_Custo"=GREATEST("Preco_Custo",%s),
+                                            "Preco_Venda"=GREATEST("Preco_Venda",%s)
+                                            WHERE "Codigo"=%s AND "Vencimento"=%s''', u)
                             conn.commit()
                         st.success(f"✅ {len(ins)} inseridos, {len(upd)} atualizados.")
                         st.cache_data.clear(); st.rerun()
@@ -499,16 +497,18 @@ elif menu == "📤 Saída":
 
     if cod_s:
         with get_conn() as conn:
-            cur = conn.cursor()
-            if venc_s:
-                cur.execute('''SELECT id,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento
-                               FROM estoque WHERE Codigo=? AND Vencimento=? AND Quantidade>0''',
-                        (cod_s, venc_s.isoformat()))
-            else:
-                cur.execute('''SELECT id,Descricao,Quantidade,Preco_Custo,Preco_Venda,Vencimento
-                               FROM estoque WHERE Codigo=? AND Quantidade>0
-                               ORDER BY Vencimento ASC LIMIT 1''', (cod_s,))
-            item_pv = cur.fetchone()
+            with conn.cursor() as cur:
+                if venc_s:
+                    cur.execute('''SELECT id,"Descricao","Quantidade","Preco_Custo","Preco_Venda","Vencimento"
+                                   FROM estoque WHERE "Codigo"=%s AND "Vencimento"=%s AND "Quantidade">0''',
+                                (cod_s, venc_s.isoformat()))
+                else:
+                    cur.execute('''SELECT id,"Descricao","Quantidade","Preco_Custo","Preco_Venda","Vencimento"
+                                   FROM estoque WHERE "Codigo"=%s AND "Quantidade">0
+                                   ORDER BY "Vencimento" ASC LIMIT 1''', (cod_s,))
+                item_pv = cur.fetchone()
+                if item_pv:
+                    item_pv = dict(item_pv)
 
         if item_pv:
             vf = datetime.strptime(item_pv['Vencimento'], '%Y-%m-%d').strftime('%d/%m/%Y') if item_pv['Vencimento'] else '—'
@@ -532,7 +532,7 @@ elif menu == "📤 Saída":
                 margem_prev      = lucro_prev / valor_total_prev * 100 if valor_total_prev > 0 else 0
 
                 col_a, col_b, col_c = st.columns(3)
-                col_a.metric("Receita prevista",    formatar_moeda(valor_total_prev))
+                col_a.metric("Receita prevista",     formatar_moeda(valor_total_prev))
                 col_b.metric("Lucro bruto previsto", formatar_moeda(lucro_prev))
                 col_c.metric("Margem prevista",      f"{margem_prev:.1f}%")
 
@@ -556,19 +556,19 @@ elif menu == "📤 Saída":
             st.error(f"⛔ Estoque insuficiente! Disponível: {item_pv['Quantidade']} un.")
         else:
             with get_conn() as conn:
-                cur = conn.cursor()
-                cur.execute('UPDATE estoque SET Quantidade=Quantidade-? WHERE id=?', (qtd_s, item_pv['id']))
-                if op_s == "Venda":
-                    val   = qtd_s * preco_conf
-                    ganho = val - qtd_s * item_pv['Preco_Custo']
-                    cur.execute('INSERT INTO financeiro (Codigo,Descricao,tipo,quantidade,preco_custo_unit,valor_total) VALUES (?,?,?,?,?,?)',
-                                (cod_s, item_pv['Descricao'], 'Venda', qtd_s, item_pv['Preco_Custo'], val))
-                    st.success(f"✅ Venda registrada! Receita: {formatar_moeda(val)} | Lucro bruto: {formatar_moeda(ganho)}")
-                else:
-                    val = qtd_s * item_pv['Preco_Custo']
-                    cur.execute('INSERT INTO financeiro (Codigo,Descricao,tipo,quantidade,preco_custo_unit,valor_total) VALUES (?,?,?,?,?,?)',
-                                (cod_s, item_pv['Descricao'], 'Perda', qtd_s, item_pv['Preco_Custo'], val))
-                    st.success(f"✅ Perda registrada! Prejuízo: {formatar_moeda(val)}")
+                with conn.cursor() as cur:
+                    cur.execute('UPDATE estoque SET "Quantidade"="Quantidade"-%s WHERE id=%s', (qtd_s, item_pv['id']))
+                    if op_s == "Venda":
+                        val   = qtd_s * preco_conf
+                        ganho = val - qtd_s * item_pv['Preco_Custo']
+                        cur.execute('INSERT INTO financeiro ("Codigo","Descricao",tipo,quantidade,preco_custo_unit,valor_total) VALUES (%s,%s,%s,%s,%s,%s)',
+                                    (cod_s, item_pv['Descricao'], 'Venda', qtd_s, item_pv['Preco_Custo'], val))
+                        st.success(f"✅ Venda registrada! Receita: {formatar_moeda(val)} | Lucro bruto: {formatar_moeda(ganho)}")
+                    else:
+                        val = qtd_s * item_pv['Preco_Custo']
+                        cur.execute('INSERT INTO financeiro ("Codigo","Descricao",tipo,quantidade,preco_custo_unit,valor_total) VALUES (%s,%s,%s,%s,%s,%s)',
+                                    (cod_s, item_pv['Descricao'], 'Perda', qtd_s, item_pv['Preco_Custo'], val))
+                        st.success(f"✅ Perda registrada! Prejuízo: {formatar_moeda(val)}")
                 conn.commit()
             st.cache_data.clear()
 
@@ -587,13 +587,13 @@ elif menu == "🔒 Segurança":
             cod_del = st.text_input("Código do item:")
             if cod_del and aprovar_acao_master("del_item", f"Excluir código {cod_del}"):
                 with get_conn() as conn:
-                    cur = conn.cursor()
-                    cur.execute('SELECT * FROM estoque WHERE Codigo=?', (cod_del,))
-                    if cur.fetchone():
-                        cur.execute('DELETE FROM estoque WHERE Codigo=?', (cod_del,))
-                        st.success(f"✅ Código **{cod_del}** apagado!")
-                    else:
-                        st.error("⛔ Código não encontrado.")
+                    with conn.cursor() as cur:
+                        cur.execute('SELECT id FROM estoque WHERE "Codigo"=%s', (cod_del,))
+                        if cur.fetchone():
+                            cur.execute('DELETE FROM estoque WHERE "Codigo"=%s', (cod_del,))
+                            st.success(f"✅ Código **{cod_del}** apagado!")
+                        else:
+                            st.error("⛔ Código não encontrado.")
                     conn.commit()
                 st.cache_data.clear()
 
@@ -606,10 +606,10 @@ elif menu == "🔒 Segurança":
             ])
             if aprovar_acao_master("limpeza", f"Limpeza: {opcao}"):
                 with get_conn() as conn:
-                    cur = conn.cursor()
-                    if "1️⃣" in opcao: cur.execute('UPDATE estoque SET Quantidade=0'); st.success("Quantidades zeradas!")
-                    elif "2️⃣" in opcao: cur.execute("DELETE FROM estoque"); st.success("Estoque apagado!")
-                    elif "3️⃣" in opcao: cur.execute("DELETE FROM financeiro"); st.success("Histórico financeiro limpo!")
+                    with conn.cursor() as cur:
+                        if "1️⃣" in opcao:   cur.execute('UPDATE estoque SET "Quantidade"=0'); st.success("Quantidades zeradas!")
+                        elif "2️⃣" in opcao: cur.execute("DELETE FROM estoque");              st.success("Estoque apagado!")
+                        elif "3️⃣" in opcao: cur.execute("DELETE FROM financeiro");           st.success("Histórico financeiro limpo!")
                     conn.commit()
                 st.cache_data.clear(); st.rerun()
     elif senha:
@@ -620,7 +620,7 @@ elif menu == "🔒 Segurança":
 # ==========================================
 elif menu == "🔒 Financeiro":
     st.title("🔒 Financeiro Supermercado Econômico")
-    
+
     senha = st.text_input("Senha:", type="password", key="senha_fin")
 
     if senha in (SENHA_ACESSO, SENHA_ZERAR_ESTOQUE):
@@ -647,19 +647,19 @@ elif menu == "🔒 Financeiro":
             margem_liquida = (resultado / receita * 100) if receita > 0 else 0
 
             with get_conn() as conn:
-                cur = conn.cursor()
-                cur.execute('SELECT COALESCE(SUM(Quantidade*Preco_Custo),0) as v FROM estoque WHERE Quantidade>0')
-                val_estoque = float(cur.fetchone()['v'])
+                with conn.cursor() as cur:
+                    cur.execute('SELECT COALESCE(SUM("Quantidade"*"Preco_Custo"),0) as v FROM estoque WHERE "Quantidade">0')
+                    val_estoque = float(cur.fetchone()['v'])
 
             st.markdown("### 📊 Resumo do Período")
-            
+
             k1, k2, k3 = st.columns(3)
             k1.metric("💵 Receita Bruta",      formatar_moeda(receita))
             k2.metric("🏷️ Custo das Vendas",  formatar_moeda(custo_vend))
             k3.metric("📈 Lucro Bruto",        formatar_moeda(lucro), delta=f"{margem:.1f}% margem")
 
-            st.markdown("<br>", unsafe_allow_html=True) 
-            
+            st.markdown("<br>", unsafe_allow_html=True)
+
             k4, k5, k6 = st.columns(3)
             k4.metric("🗑️ Perdas",             formatar_moeda(tot_perdas))
             k5.metric("✅ Resultado Líquido",  formatar_moeda(resultado), delta=f"{margem_liquida:.1f}% margem líquida")
@@ -727,20 +727,16 @@ elif menu == "🔒 Financeiro":
                     st.markdown("#### ⚡ Alertas Automáticos")
                     alertas = []
 
-                    # Vendas abaixo do custo
                     dv2['abaixo'] = dv2['ganho_u'] < 0
                     for p in dv2[dv2['abaixo']]['Descricao'].unique():
                         alertas.append(("🔴", f"**{p}** vendido abaixo do custo em alguma transação."))
 
-                    # Perdas > 20% da receita
                     if receita > 0 and tot_perdas/receita > 0.2:
                         alertas.append(("🟠", f"Perdas = **{tot_perdas/receita*100:.1f}%** da receita — acima de 20%."))
 
-                    # Margem bruta baixa
                     if 0 < margem < 15:
                         alertas.append(("🟡", f"Margem bruta baixa: **{margem:.1f}%**. Revisar preços de venda."))
 
-                    # Alto giro com baixa margem
                     vol_prod = dv2.groupby('Descricao')['quantidade'].sum()
                     mg_prod  = dv2.groupby('Descricao').apply(
                         lambda g: g['ganho_u'].sum()/g['valor_total'].sum()*100 if g['valor_total'].sum()>0 else 0)
